@@ -1,0 +1,745 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>eGym Viewer</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<style>
+  :root, html[data-theme="dark"] {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1f232d;
+    --border: #2a2f3a;
+    --fg: #e6e8ee;
+    --muted: #8b93a7;
+    --accent: #4f9cff;
+    --accent-2: #60e2a4;
+    --grid: #2a2f3a;
+    --err-bg: #2a1515;
+    --err-border: #552222;
+    --err-fg: #ff6b6b;
+  }
+  html[data-theme="light"] {
+    --bg: #f7f8fa;
+    --panel: #ffffff;
+    --panel-2: #f1f3f5;
+    --border: #e2e5ea;
+    --fg: #1a1f2b;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --accent-2: #10b981;
+    --grid: #e5e7eb;
+    --err-bg: #fef2f2;
+    --err-border: #fecaca;
+    --err-fg: #b91c1c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--fg);
+    padding: 24px; min-height: 100vh;
+  }
+  h1 { margin: 0 0 4px; font-size: 22px; font-weight: 600; }
+  h2 { font-size: 14px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 12px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .grid { display: grid; gap: 16px; }
+  .cards { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+  .card .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+  .card .sublabel { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-top: 16px; }
+  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  select, button {
+    background: var(--panel-2); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 10px; font-size: 13px; font-family: inherit;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .toggle-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
+  .toolbar { gap: 16px; }
+  .toolbar .group { display: flex; align-items: center; gap: 6px; }
+  .chart-wrap { position: relative; height: 360px; }
+  .chart-wrap.small { height: 240px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 11px; letter-spacing: .06em; }
+  tr:last-child td { border-bottom: none; }
+  .muted { color: var(--muted); }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border); font-size: 11px; color: var(--muted); }
+  .pill.machine { color: var(--accent); }
+  .pill.cardio { color: var(--accent-2); }
+  .error { color: var(--err-fg); padding: 12px; background: var(--err-bg); border: 1px solid var(--err-border); border-radius: 8px; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 800px) { .two-col { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+  <div class="row" style="justify-content: space-between; margin-bottom: 4px;">
+    <h1>eGym Workout Viewer</h1>
+    <div class="row toolbar">
+      <div class="group">
+        <span class="muted" style="font-size:12px">Range:</span>
+        <button data-range="7d" class="toggle-btn range-btn">7d</button>
+        <button data-range="30d" class="toggle-btn range-btn">30d</button>
+        <button data-range="90d" class="toggle-btn range-btn">90d</button>
+        <button data-range="all" class="toggle-btn range-btn">All</button>
+      </div>
+      <div class="group">
+        <span class="muted" style="font-size:12px">Units:</span>
+        <button id="unit-lb" class="toggle-btn unit-btn">lb</button>
+        <button id="unit-kg" class="toggle-btn unit-btn">kg</button>
+      </div>
+      <div class="group">
+        <span class="muted" style="font-size:12px">Theme:</span>
+        <button data-theme="light" class="toggle-btn theme-btn" title="Light mode">☀</button>
+        <button data-theme="dark" class="toggle-btn theme-btn" title="Dark mode">☾</button>
+      </div>
+    </div>
+  </div>
+  <div class="sub" id="header-sub">Loading…</div>
+
+  <div id="err" class="error" style="display:none"></div>
+
+  <div id="main" style="display:none">
+    <div class="grid cards" id="stats"></div>
+
+    <div class="panel" id="bio-panel" style="display:none">
+      <h2>Bio Age <span class="muted" style="font-weight:400; text-transform:none; letter-spacing:0">— from eGym Genius assessment</span></h2>
+      <div class="grid cards" id="bio-cards"></div>
+    </div>
+
+    <div class="panel">
+      <h2 id="ap-title">Activity Points</h2>
+      <div class="chart-wrap small"><canvas id="ap-chart"></canvas></div>
+    </div>
+
+    <div class="two-col">
+      <div class="panel">
+        <h2>Weight per Rep by Machine</h2>
+        <div class="row" style="margin-bottom:12px">
+          <label class="muted" for="machine">Machine:</label>
+          <select id="machine"></select>
+        </div>
+        <div class="chart-wrap"><canvas id="weight-chart"></canvas></div>
+      </div>
+
+      <div class="panel">
+        <h2>Total Volume per Day (this machine)</h2>
+        <div class="chart-wrap"><canvas id="volume-chart"></canvas></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>1RM Trend <span class="muted" style="font-weight:400; text-transform:none; letter-spacing:0">— latest eGym strength test vs. previous</span></h2>
+      <table id="strength-table">
+        <thead><tr>
+          <th>Machine</th>
+          <th>Body Region</th>
+          <th>1RM</th>
+          <th>Trend</th>
+          <th>Change</th>
+          <th>Last Measured</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <h2 id="pr-title">Volume Records — ranked by best-day volume</h2>
+      <table id="prs-table">
+        <thead><tr>
+          <th>Machine</th>
+          <th>Best Day</th>
+          <th>Best Day Volume</th>
+          <th>Sets That Day</th>
+          <th>Heaviest Working Weight</th>
+          <th>Last Done</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <h2>Gym Days (grouped)</h2>
+      <table id="workouts-table">
+        <thead><tr><th>Date</th><th>Machines</th><th>Exercises</th><th>Work</th><th>Activity Pts</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <footer style="margin-top:32px; text-align:center; font-size:11px; color:var(--muted); opacity:0.7;">
+    <a href="license.html" style="color:inherit">MIT</a>
+    · <a href="https://github.com/togabrennan/egym-personal-viewer" style="color:inherit">source</a>
+    · not affiliated with eGym or Netpulse
+  </footer>
+
+<script>
+// Unit state — eGym stores everything in kg; convert for display.
+const KG_TO_LB = 2.2046226218;
+let UNIT = localStorage.getItem("egym_unit") || "lb";
+const convert = kg => kg == null ? null : (UNIT === "kg" ? Number(kg) : Number(kg) * KG_TO_LB);
+const unitLabel = () => UNIT;
+
+// Theme state. Default = system preference; explicit localStorage choice wins.
+function initialTheme() {
+  const saved = localStorage.getItem("egym_theme");
+  if (saved === "light" || saved === "dark") return saved;
+  return (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) ? "light" : "dark";
+}
+let THEME = initialTheme();
+document.documentElement.setAttribute("data-theme", THEME);
+
+// Time range state.
+const RANGE_DAYS = { "7d": 7, "30d": 30, "90d": 90, "all": null };
+const RANGE_LABELS = { "7d": "Last 7 days", "30d": "Last 30 days", "90d": "Last 90 days", "all": "All time" };
+let RANGE = localStorage.getItem("egym_range") || "30d";
+if (!(RANGE in RANGE_DAYS)) RANGE = "30d";
+
+const fmt = (n, d=1) => n == null ? "" : Number(n).toLocaleString(undefined, {maximumFractionDigits: d});
+const fmtDate = s => s ? new Date(s).toLocaleDateString(undefined, {month:"short", day:"numeric", year:"numeric"}) : "";
+const fmtDateTime = s => s ? new Date(s).toLocaleString(undefined, {month:"short", day:"numeric", hour:"numeric", minute:"2-digit"}) : "";
+const fmtDayLong = s => s ? new Date(s).toLocaleDateString(undefined, {weekday:"short", month:"short", day:"numeric", year:"numeric"}) : "";
+const dayKey = s => {
+  const d = new Date(s);
+  return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+};
+const isMachine = r => r.exercise_source === "fitness_machine";
+const normName = s => (s || "").toLowerCase().replace(/[^a-z]/g, "");
+
+function inRange(row) {
+  const days = RANGE_DAYS[RANGE];
+  if (days == null) return true;
+  const cutoff = Date.now() - days * 86400e3;
+  const t = new Date(row.exercise_completed_at || row.workout_completed_at).getTime();
+  return t >= cutoff;
+}
+
+let ALL_ROWS = null;
+let BRAND = "", GENERATED_AT = "";
+let CURRENT_MACHINE = null;
+let ACTIVITY_CHART = null;
+let STRENGTH_BY_MACHINE = {};
+let STRENGTH_HISTORY = {};
+let BIO_AGE = null;
+
+function getFilteredRows() {
+  return ALL_ROWS.filter(inRange);
+}
+
+function rerenderAll() {
+  if (!ALL_ROWS) return;
+  const rows = getFilteredRows();
+  updateHeader(rows);
+  renderStats(rows);
+  if (ACTIVITY_CHART) { ACTIVITY_CHART.destroy(); ACTIVITY_CHART = null; }
+  renderActivityPoints(rows);
+  renderMachineSelector(rows);
+  renderRecent(rows);
+  renderStrengthPRs();     // not filtered — strength is "latest" only
+  renderVolumePRs(rows);
+}
+
+function updateHeader(rows) {
+  const gymDays = new Set(rows.map(r => dayKey(r.exercise_completed_at || r.workout_completed_at))).size;
+  document.getElementById("header-sub").innerHTML =
+    `Brand: <strong>${BRAND}</strong> · ${gymDays} gym days in ${RANGE_LABELS[RANGE].toLowerCase()} · Machines only · Last sync ${fmtDateTime(GENERATED_AT)}`;
+  document.getElementById("ap-title").textContent = `Activity Points — ${RANGE_LABELS[RANGE]}`;
+  document.getElementById("pr-title").textContent = `Volume Records — ${RANGE_LABELS[RANGE]} (ranked by best-day volume)`;
+}
+
+function setUnit(u) {
+  UNIT = u;
+  localStorage.setItem("egym_unit", u);
+  document.querySelectorAll(".unit-btn").forEach(b => b.classList.toggle("active", b.id === "unit-" + u));
+  rerenderAll();
+}
+
+function setRange(r) {
+  RANGE = r;
+  localStorage.setItem("egym_range", r);
+  document.querySelectorAll(".range-btn").forEach(b => b.classList.toggle("active", b.dataset.range === r));
+  rerenderAll();
+}
+
+function cssVar(name, fallback) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
+function applyChartDefaultsFromTheme() {
+  Chart.defaults.color = cssVar("--muted", "#8b93a7");
+  Chart.defaults.borderColor = cssVar("--grid", "#2a2f3a");
+}
+
+function setTheme(t) {
+  THEME = t;
+  localStorage.setItem("egym_theme", t);
+  document.documentElement.setAttribute("data-theme", t);
+  document.querySelectorAll(".theme-btn").forEach(b => b.classList.toggle("active", b.dataset.theme === t));
+  applyChartDefaultsFromTheme();
+  rerenderAll();
+}
+
+async function load() {
+  document.getElementById("unit-lb").addEventListener("click", () => setUnit("lb"));
+  document.getElementById("unit-kg").addEventListener("click", () => setUnit("kg"));
+  document.querySelectorAll(".range-btn").forEach(btn => {
+    btn.addEventListener("click", () => setRange(btn.dataset.range));
+  });
+  document.querySelectorAll(".theme-btn").forEach(btn => {
+    btn.addEventListener("click", () => setTheme(btn.dataset.theme));
+  });
+  document.querySelectorAll(".unit-btn").forEach(b => b.classList.toggle("active", b.id === "unit-" + UNIT));
+  document.querySelectorAll(".range-btn").forEach(b => b.classList.toggle("active", b.dataset.range === RANGE));
+  document.querySelectorAll(".theme-btn").forEach(b => b.classList.toggle("active", b.dataset.theme === THEME));
+
+  let data;
+  try {
+    const r = await fetch("data/workouts.json?_=" + Date.now());
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    data = await r.json();
+  } catch (e) {
+    document.getElementById("err").style.display = "block";
+    document.getElementById("err").textContent = "Could not load data/workouts.json: " + e.message + ". Run `python3 fetch.py` first.";
+    document.getElementById("header-sub").textContent = "No data";
+    return;
+  }
+
+  BRAND = data.brand;
+  GENERATED_AT = data.generated_at;
+  ALL_ROWS = data.rows.filter(isMachine);
+  // Strength arrives as a full history (multiple readings per machine).
+  // Group by normalized machine name; within each, sort chronologically.
+  STRENGTH_BY_MACHINE = {};       // name -> latest reading (with trend derived from prev)
+  STRENGTH_HISTORY = {};          // name -> sorted array of {measured_at, one_rep_max_kg}
+  const byMachine = {};
+  for (const s of data.strength || []) {
+    const k = normName(s.exercise_name);
+    (byMachine[k] = byMachine[k] || []).push(s);
+  }
+  for (const [k, arr] of Object.entries(byMachine)) {
+    arr.sort((a, b) => new Date(a.measured_at) - new Date(b.measured_at));
+    STRENGTH_HISTORY[k] = arr;
+    const latest = arr[arr.length - 1];
+    const prev = arr.length >= 2 ? arr[arr.length - 2] : null;
+    // Derive trend from consecutive readings rather than trusting the API's amount_diff_kg,
+    // which is rounded to whole kg (so sub-1kg changes show as 0).
+    let progress = null, percentage_diff = null, amount_diff_kg = null;
+    if (prev && latest.one_rep_max_kg != null && prev.one_rep_max_kg != null) {
+      amount_diff_kg = latest.one_rep_max_kg - prev.one_rep_max_kg;
+      percentage_diff = prev.one_rep_max_kg !== 0
+        ? (amount_diff_kg / prev.one_rep_max_kg) * 100
+        : null;
+      progress = amount_diff_kg > 0 ? "up" : amount_diff_kg < 0 ? "down" : "same";
+    }
+    STRENGTH_BY_MACHINE[k] = {
+      ...latest,
+      progress: progress ?? latest.progress,
+      percentage_diff: percentage_diff ?? latest.percentage_diff,
+      amount_diff_kg: amount_diff_kg ?? latest.amount_diff_kg,
+    };
+  }
+
+  BIO_AGE = data.bio_age || null;
+
+  document.getElementById("main").style.display = "block";
+  renderBioAge();
+
+  applyChartDefaultsFromTheme();
+  Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+
+  rerenderAll();
+}
+
+function renderBioAge() {
+  const b = BIO_AGE;
+  if (!b || Object.keys(b).length === 0) return;
+  document.getElementById("bio-panel").style.display = "block";
+
+  // The /bioage snapshot returns amountDiff/percentageDiff fields, but they don't match
+  // either the last-reading delta or the baseline delta the app UI shows. Hiding them
+  // until we unlock a proper history endpoint.
+  const trend = () => "";
+
+  const cards = [];
+  const total = b.totalDetails?.totalBioAge;
+  if (total?.value != null) cards.push({ label: "Total Bio Age", value: total.value, sub: trend(total) });
+
+  const cd = b.cardioDetails || {};
+  if (cd.cardioAge?.value != null) {
+    const sub = [trend(cd.cardioAge)];
+    if (cd.restingHeartRate?.value != null) sub.push(`RHR ${cd.restingHeartRate.value}`);
+    if (cd.vo2max?.value != null) sub.push(`VO₂max ${cd.vo2max.value}`);
+    cards.push({ label: "Cardio Age", value: cd.cardioAge.value, sub: sub.filter(Boolean).join(" · ") });
+  }
+
+  const md = b.metabolicDetails || {};
+  if (md.metabolicAge?.value != null) {
+    const sub = [trend(md.metabolicAge)];
+    if (md.bmi?.value != null) sub.push(`BMI ${fmt(md.bmi.value, 1)}`);
+    if (md.bodyFat?.value != null) sub.push(`Body fat ${fmt(md.bodyFat.value, 1)}%`);
+    cards.push({ label: "Metabolic Age", value: md.metabolicAge.value, sub: sub.filter(Boolean).join(" · ") });
+  }
+
+  const mu = b.muscleDetails || {};
+  if (mu.muscleBioAge?.value != null) {
+    const parts = [];
+    if (mu.upperBodyAge?.value != null) parts.push(`Upper ${mu.upperBodyAge.value}`);
+    if (mu.coreAge?.value != null) parts.push(`Core ${mu.coreAge.value}`);
+    if (mu.lowerBodyAge?.value != null) parts.push(`Lower ${mu.lowerBodyAge.value}`);
+    cards.push({ label: "Muscle Age", value: mu.muscleBioAge.value, sub: parts.join(" · ") });
+  }
+
+  const fd = b.flexibilityDetails;
+  const flexAge = fd?.flexibilityAge?.value;
+  cards.push({
+    label: "Flexibility Age",
+    value: flexAge != null ? flexAge : `<span class="muted">—</span>`,
+    sub: flexAge != null ? trend(fd.flexibilityAge) : `<span class="muted">Not yet measured</span>`,
+  });
+
+  document.getElementById("bio-cards").innerHTML = cards.map(c =>
+    `<div class="card"><div class="label">${c.label}</div><div class="value">${c.value}</div>${c.sub ? `<div class="sublabel">${c.sub}</div>` : ""}</div>`
+  ).join("");
+}
+
+function renderStats(rows) {
+  const days = new Set(rows.map(r => dayKey(r.exercise_completed_at || r.workout_completed_at)));
+  const withWeight = rows.filter(r => r.weight != null);
+  const machines = new Set(rows.map(r => r.exercise_name));
+  const totalSets = withWeight.length;
+  const totalVolume = withWeight.reduce((s, r) => s + (Number(r.weight) || 0) * (Number(r.reps) || 0), 0);
+  // Dedup AP per exercise event (one workout_code + exercise_code combo).
+  const apSeen = new Set();
+  let totalAP = 0;
+  for (const r of rows) {
+    const k = r.workout_code + "|" + r.exercise_code;
+    if (apSeen.has(k)) continue;
+    apSeen.add(k);
+    totalAP += Number(r.activity_points) || 0;
+  }
+  const dates = rows.map(r => r.workout_completed_at).filter(Boolean).sort();
+  const firstDate = dates[0];
+
+  const stats = [
+    {label: "Gym days", value: days.size, sub: firstDate ? `since ${fmtDate(firstDate)}` : ""},
+    {label: "Machines used", value: machines.size},
+    {label: "Total sets", value: totalSets},
+    {label: "Total volume lifted", value: fmt(convert(totalVolume), 0), sub: `${unitLabel()} (weight × reps)`},
+    {label: "Activity points", value: fmt(totalAP, 0), sub: "machines only"},
+  ];
+  document.getElementById("stats").innerHTML = stats.map(s =>
+    `<div class="card"><div class="label">${s.label}</div><div class="value">${s.value}</div>${s.sub?`<div class="sublabel">${s.sub}</div>`:""}</div>`
+  ).join("");
+}
+
+function renderActivityPoints(rows) {
+  const byDay = new Map();
+  const seen = new Set();
+  for (const r of rows) {
+    if (!r.activity_points) continue;
+    const k = r.workout_code + "|" + r.exercise_code;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const t = new Date(r.exercise_completed_at || r.workout_completed_at).getTime();
+    const key = dayKey(t);
+    byDay.set(key, (byDay.get(key) || 0) + Number(r.activity_points));
+  }
+  const days = [...byDay.keys()].sort();
+  const values = days.map(d => byDay.get(d));
+  ACTIVITY_CHART = new Chart(document.getElementById("ap-chart"), {
+    type: "bar",
+    data: {
+      labels: days,
+      datasets: [{ label: "Activity Points", data: values, backgroundColor: "#4f9cff" }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { type: "time", time: { unit: "day" }, grid: { display: false } },
+        y: { beginAtZero: true, grid: { color: cssVar("--grid", "#2a2f3a") } },
+      },
+      plugins: { legend: { display: false } },
+    },
+  });
+}
+
+let weightChart, volumeChart;
+
+function renderMachineSelector(rows) {
+  const machineRows = rows.filter(r => r.weight != null);
+  const machineCounts = {};
+  for (const r of machineRows) {
+    machineCounts[r.exercise_name] = (machineCounts[r.exercise_name] || 0) + 1;
+  }
+  const machines = Object.keys(machineCounts).sort((a,b) => machineCounts[b] - machineCounts[a]);
+  const sel = document.getElementById("machine");
+  sel.innerHTML = machines.map(m => `<option value="${m}">${m} (${machineCounts[m]} sets)</option>`).join("");
+  // Assigning onchange replaces any previous handler — no listener leak on re-render.
+  sel.onchange = () => {
+    CURRENT_MACHINE = sel.value;
+    renderMachineCharts(getFilteredRows(), sel.value);
+  };
+  // Preserve user's selection across re-renders when still available.
+  let pick = CURRENT_MACHINE && machines.includes(CURRENT_MACHINE) ? CURRENT_MACHINE : machines[0];
+  if (pick) {
+    CURRENT_MACHINE = pick;
+    sel.value = pick;
+    renderMachineCharts(rows, pick);
+  } else {
+    CURRENT_MACHINE = null;
+    // Clear charts if no machines in range.
+    if (weightChart) { weightChart.destroy(); weightChart = null; }
+    if (volumeChart) { volumeChart.destroy(); volumeChart = null; }
+  }
+}
+
+function renderMachineCharts(rows, machine) {
+  const sets = rows.filter(r => r.exercise_name === machine && r.weight != null)
+    .sort((a,b) => new Date(a.exercise_completed_at) - new Date(b.exercise_completed_at));
+
+  // Weight per rep (one dot per set)
+  const weightData = sets.map(r => ({
+    x: new Date(r.exercise_completed_at).getTime(),
+    y: convert(r.weight),
+    reps: r.reps,
+  }));
+
+  // 1RM strength-test markers, respecting the active time range.
+  const rangeDays = RANGE_DAYS[RANGE];
+  const cutoff = rangeDays == null ? -Infinity : Date.now() - rangeDays * 86400e3;
+  const history = STRENGTH_HISTORY[normName(machine)] || [];
+  const rmData = history
+    .filter(s => s.one_rep_max_kg != null && s.measured_at)
+    .map(s => ({ x: new Date(s.measured_at).getTime(), y: convert(s.one_rep_max_kg) }))
+    .filter(p => p.x >= cutoff);
+
+  if (weightChart) weightChart.destroy();
+  weightChart = new Chart(document.getElementById("weight-chart"), {
+    type: "line",
+    data: {
+      datasets: [
+        {
+          label: `Working Weight (${unitLabel()})`,
+          data: weightData,
+          borderColor: "#4f9cff",
+          backgroundColor: "#4f9cff",
+          pointRadius: 4,
+          pointHoverRadius: 6,
+          tension: 0.2,
+        },
+        {
+          label: `1RM Test (${unitLabel()})`,
+          data: rmData,
+          borderColor: "#ff9f40",
+          backgroundColor: "#ff9f40",
+          borderWidth: 2,
+          borderDash: [4, 4],
+          pointRadius: 6,
+          pointStyle: "rectRot",
+          pointHoverRadius: 8,
+          tension: 0,
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { type: "time", time: { unit: "day" }, grid: { display: false } },
+        y: { beginAtZero: false, title: { display: true, text: `Weight (${unitLabel()})` }, grid: { color: cssVar("--grid", "#2a2f3a") } },
+      },
+      plugins: {
+        legend: { display: true, position: "top", labels: { boxWidth: 12 } },
+        tooltip: {
+          callbacks: {
+            label: ctx => ctx.datasetIndex === 0
+              ? `${ctx.raw.y.toFixed(1)} ${unitLabel()} × ${ctx.raw.reps} reps`
+              : `1RM test: ${ctx.raw.y.toFixed(1)} ${unitLabel()}`,
+          },
+        },
+      },
+    },
+  });
+
+  // Volume per day for this machine
+  const byDay = new Map();
+  for (const r of sets) {
+    const vol = (Number(r.weight) || 0) * (Number(r.reps) || 0);
+    const dk = dayKey(r.exercise_completed_at);
+    const cur = byDay.get(dk) || { date: r.exercise_completed_at, volume: 0, sets: 0 };
+    cur.volume += vol;
+    cur.sets += 1;
+    byDay.set(dk, cur);
+  }
+  const volData = [...byDay.values()]
+    .sort((a,b) => new Date(a.date) - new Date(b.date))
+    .map(d => ({ x: new Date(d.date).getTime(), y: convert(d.volume), sets: d.sets }));
+
+  if (volumeChart) volumeChart.destroy();
+  volumeChart = new Chart(document.getElementById("volume-chart"), {
+    type: "bar",
+    data: {
+      datasets: [{
+        label: `Volume (${unitLabel()})`,
+        data: volData,
+        backgroundColor: "#60e2a4",
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { type: "time", time: { unit: "day" }, grid: { display: false } },
+        y: { beginAtZero: true, title: { display: true, text: `Volume (${unitLabel()})` }, grid: { color: cssVar("--grid", "#2a2f3a") } },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => `${ctx.raw.y.toFixed(0)} ${unitLabel()} total · ${ctx.raw.sets} set(s)`,
+          },
+        },
+      },
+    },
+  });
+}
+
+function renderStrengthPRs() {
+  // All strength measurements, sorted by 1RM desc. Not time-filtered — API only returns "latest".
+  const rows = Object.values(STRENGTH_BY_MACHINE)
+    .filter(s => s.one_rep_max_kg != null)
+    .sort((a, b) => b.one_rep_max_kg - a.one_rep_max_kg);
+
+  const html = rows.map(s => {
+    const dir = s.progress;
+    const pct = s.percentage_diff;
+    const current = s.one_rep_max_kg;
+    // API truncates amount_diff_kg to integer kg. Recompute from pct × current for precision —
+    // otherwise sub-1kg changes render as "0 lb".
+    const kgDelta = (pct != null && current != null && (100 + pct) !== 0)
+      ? current * pct / (100 + pct)
+      : s.amount_diff_kg;
+    const arrow = dir === "up" ? "▲" : dir === "down" ? "▼" : "·";
+    const color = dir === "up" ? "#60e2a4" : dir === "down" ? "#ff6b6b" : "#8b93a7";
+    const trend = dir ? `<span style="color:${color}">${arrow} ${dir}</span>` : "";
+    const change = (kgDelta != null && pct != null)
+      ? `<span style="color:${color}">${kgDelta > 0 ? "+" : ""}${fmt(convert(kgDelta), 1)} ${unitLabel()} (${pct > 0 ? "+" : ""}${fmt(pct, 1)}%)</span>`
+      : "";
+    return `<tr>
+      <td>${s.exercise_name || ""}</td>
+      <td class="muted">${s.body_region || ""}</td>
+      <td><strong>${fmt(convert(current), 0)} ${unitLabel()}</strong></td>
+      <td>${trend}</td>
+      <td>${change}</td>
+      <td class="muted">${fmtDate(s.measured_at)}</td>
+    </tr>`;
+  }).join("");
+  document.querySelector("#strength-table tbody").innerHTML =
+    html || `<tr><td colspan="6" class="muted">No strength measurements available.</td></tr>`;
+}
+
+function renderVolumePRs(rows) {
+  // Per machine, per day: sum volume and track heaviest working weight.
+  const byMachine = new Map();
+  for (const r of rows) {
+    if (r.weight == null) continue;
+    const m = r.exercise_name;
+    if (!byMachine.has(m)) byMachine.set(m, {
+      days: new Map(),
+      heaviest: 0,
+      last: null,
+    });
+    const e = byMachine.get(m);
+    const w = Number(r.weight) || 0;
+    const reps = Number(r.reps) || 0;
+    const vol = w * reps;
+    const dk = dayKey(r.exercise_completed_at);
+
+    if (!e.days.has(dk)) e.days.set(dk, { date: r.exercise_completed_at, volume: 0, sets: 0 });
+    const d = e.days.get(dk);
+    d.volume += vol;
+    d.sets += 1;
+
+    if (w > e.heaviest) e.heaviest = w;
+    const t = new Date(r.exercise_completed_at);
+    if (!e.last || t > e.last) e.last = t;
+  }
+  const ranked = [...byMachine.entries()].map(([m, e]) => {
+    let bestDay = null;
+    for (const d of e.days.values()) {
+      if (!bestDay || d.volume > bestDay.volume) bestDay = d;
+    }
+    return { machine: m, e, bestDay };
+  }).sort((a, b) => (b.bestDay?.volume || 0) - (a.bestDay?.volume || 0));
+
+  const html = ranked.map(({machine, e, bestDay}) => `<tr>
+    <td>${machine}</td>
+    <td class="muted">${bestDay ? fmtDate(bestDay.date) : ""}</td>
+    <td><strong>${bestDay ? fmt(convert(bestDay.volume), 0) + " " + unitLabel() : ""}</strong></td>
+    <td>${bestDay ? bestDay.sets : ""}</td>
+    <td class="muted">${fmt(convert(e.heaviest), 1)} ${unitLabel()}</td>
+    <td class="muted">${fmtDate(e.last)}</td>
+  </tr>`).join("");
+  document.querySelector("#prs-table tbody").innerHTML =
+    html || `<tr><td colspan="6" class="muted">No machine activity in this range.</td></tr>`;
+}
+
+function renderRecent(rows) {
+  // Group by local day.
+  const byDay = new Map();
+  const apSeen = new Set();
+  for (const r of rows) {
+    const dk = dayKey(r.exercise_completed_at || r.workout_completed_at);
+    if (!byDay.has(dk)) {
+      byDay.set(dk, {
+        date: r.exercise_completed_at || r.workout_completed_at,
+        exercises: new Map(), // name -> { sets, volume }
+        ap: 0,
+        totalSets: 0,
+        totalVolume: 0,
+      });
+    }
+    const d = byDay.get(dk);
+    const name = r.exercise_name;
+    if (name) {
+      if (!d.exercises.has(name)) d.exercises.set(name, { sets: 0, volume: 0 });
+      const e = d.exercises.get(name);
+      if (r.weight != null) {
+        e.sets += 1;
+        const vol = (Number(r.weight) || 0) * (Number(r.reps) || 0);
+        e.volume += vol;
+        d.totalSets += 1;
+        d.totalVolume += vol;
+      }
+    }
+    const apKey = r.workout_code + "|" + r.exercise_code;
+    if (!apSeen.has(apKey)) {
+      apSeen.add(apKey);
+      d.ap += Number(r.activity_points) || 0;
+    }
+  }
+  const html = [...byDay.entries()]
+    .sort((a,b) => b[0].localeCompare(a[0]))
+    .slice(0, 25)
+    .map(([dk, w]) => {
+      const pills = [...w.exercises.keys()]
+        .map(name => `<span class="pill machine">${name}</span>`)
+        .join(" ");
+      return `<tr>
+        <td>${fmtDayLong(w.date)}</td>
+        <td>${w.exercises.size} machines</td>
+        <td>${pills}</td>
+        <td>${w.totalSets} sets · ${fmt(convert(w.totalVolume), 0)} ${unitLabel()}</td>
+        <td>${fmt(w.ap, 0)}</td>
+      </tr>`;
+    }).join("");
+  document.querySelector("#workouts-table tbody").innerHTML = html;
+}
+
+load();
+</script>
+</body>
+</html>

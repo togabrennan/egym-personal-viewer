@@ -1,0 +1,7 @@
+{
+  "egym": {
+    "brand": "YOURGYMBRAND",
+    "username": "your-member-email@example.com",
+    "password": "your-member-password"
+  }
+}

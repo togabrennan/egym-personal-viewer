@@ -1,0 +1,25 @@
+# Secrets — never commit
+settings.json
+.env
+
+# Fetched data — personal, never commit
+data/workouts.json
+data/workouts.csv
+data/workouts_raw.json
+data/*.json
+data/*.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Binaries not ours to redistribute
+egym_exporter-*

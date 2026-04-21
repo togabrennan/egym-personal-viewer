@@ -6,6 +6,10 @@ Fetches fresh data only if `data/workouts.json` is missing or its
 Pass `--force` to always fetch, or `--no-fetch` to skip the staleness
 check entirely.
 
+While serving, a background loop refetches every 2 hours as long as no
+exercise has been recorded for today yet (or the most recent one is
+within the refetch interval — a workout might still be in progress).
+
 Usage:
     python3 serve.py                  # auto-fetch if stale, then serve on :8765
     python3 serve.py --port 9000      # pick a port
@@ -18,12 +22,16 @@ import argparse
 import http.server
 import json
 import socketserver
+import subprocess
 import sys
-from datetime import datetime
+import threading
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 DATA = HERE / "data" / "workouts.json"
+REFETCH_INTERVAL_SECONDS = 2 * 60 * 60
 
 
 def is_stale() -> tuple[bool, str]:
@@ -43,6 +51,78 @@ def is_stale() -> tuple[bool, str]:
         return True, f"could not parse timestamp: {e}"
 
 
+def _parse_ts(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone()
+    except Exception:
+        return None
+
+
+def _latest_set_today(rows: list) -> datetime | None:
+    """Most recent exercise_completed_at dated today (local), or None."""
+    today = datetime.now().astimezone().date()
+    latest: datetime | None = None
+    for row in rows or []:
+        ts = _parse_ts(row.get("exercise_completed_at"))
+        if ts is None:
+            continue
+        if ts.date() == today and (latest is None or ts > latest):
+            latest = ts
+    return latest
+
+
+def should_refetch() -> tuple[bool, str]:
+    """Refetch until a successful fetch has run at least one full interval
+    after the most recent set — that's our signal that any late-syncing
+    stragglers from the workout have been captured."""
+    if not DATA.exists():
+        return True, "no data/workouts.json yet"
+    try:
+        data = json.loads(DATA.read_text())
+    except Exception as e:
+        return True, f"could not read workouts.json: {e}"
+    latest_set = _latest_set_today(data.get("rows") or [])
+    if latest_set is None:
+        return True, "no exercise recorded today yet"
+    last_fetch = _parse_ts(data.get("generated_at"))
+    if last_fetch is None:
+        return True, "no prior fetch timestamp to compare against"
+    gap = last_fetch - latest_set
+    if gap < timedelta(seconds=REFETCH_INTERVAL_SECONDS):
+        mins = int(gap.total_seconds() // 60)
+        return True, f"last fetch was only {mins}m after the most recent set — workout may still be syncing"
+    return False, f"most recent set captured {int(gap.total_seconds() // 3600)}h+ before last fetch — today's workout looks complete"
+
+
+def run_fetch() -> None:
+    """Run fetch.py as a subprocess so it has its own argv/globals and its
+    failures can't take down the serve process."""
+    result = subprocess.run(
+        [sys.executable, str(HERE / "fetch.py")],
+        cwd=HERE,
+        check=False,
+    )
+    if result.returncode != 0:
+        print("[serve] fetch failed; continuing with existing data", file=sys.stderr)
+
+
+def refetch_loop() -> None:
+    while True:
+        time.sleep(REFETCH_INTERVAL_SECONDS)
+        try:
+            ok, reason = should_refetch()
+            if ok:
+                print(f"[serve] refetching: {reason}", file=sys.stderr)
+                run_fetch()
+            else:
+                print(f"[serve] skipping scheduled refetch: {reason}", file=sys.stderr)
+        except Exception as e:
+            # Never let a bad tick kill the loop — we'll try again next interval.
+            print(f"[serve] refetch tick failed: {e!r}; will retry next interval", file=sys.stderr)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--port", type=int, default=8765)
@@ -54,17 +134,12 @@ def main() -> None:
         should_fetch, reason = (True, "forced") if args.force else is_stale()
         if should_fetch:
             print(f"[serve] fetching: {reason}", file=sys.stderr)
-            import fetch  # local import so --no-fetch works without credentials
-            # Simulate a bare argparse.Namespace so resolve_credentials uses settings/env.
-            fetch.main.__globals__["sys"].argv = ["fetch.py"]
-            try:
-                fetch.main()
-            except SystemExit as e:
-                # fetch.main() calls sys.exit() on missing creds — surface that clearly.
-                if e.code:
-                    print("[serve] fetch failed; starting server with whatever data exists", file=sys.stderr)
+            run_fetch()
         else:
             print(f"[serve] skipping fetch: {reason}", file=sys.stderr)
+        threading.Thread(target=refetch_loop, daemon=True).start()
+        hours = REFETCH_INTERVAL_SECONDS / 3600
+        print(f"[serve] periodic refetch armed (every {hours:g}h while today's workout is incomplete)", file=sys.stderr)
 
     # Serve from the project root so index.html can read data/workouts.json.
     handler = http.server.SimpleHTTPRequestHandler

@@ -210,7 +210,8 @@ const dayKey = s => {
   return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
 };
 const isMachine = r => r.exercise_source === "fitness_machine";
-const normName = s => (s || "").toLowerCase().replace(/[^a-z]/g, "");
+// API spells the machine "Biceps Curl" in workouts but "Bicep curl" in strength tests.
+const normName = s => (s || "").toLowerCase().replace(/biceps/g, "bicep").replace(/[^a-z]/g, "");
 
 function inRange(row) {
   const days = RANGE_DAYS[RANGE];

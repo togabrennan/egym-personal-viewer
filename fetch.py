@@ -43,6 +43,36 @@ HEADERS_BASE = {
 
 EGYM_API = "https://mobile-api.int.api.egym.com"
 
+# Re-fetch this many days back from the latest known record on each incremental
+# run, so workouts edited or late-synced after we first saw them get refreshed.
+OVERLAP_DAYS = 7
+
+
+def parse_iso(s: object) -> datetime | None:
+    if not isinstance(s, str) or not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def strength_measured_at(s: dict) -> str | None:
+    """Resolve the real measurement timestamp from a raw strength record.
+
+    The history endpoint puts a sentinel "1970-01-01" in strength.createdAt;
+    the real timestamp is on the outer record. Fall through both, ignoring
+    any 1970 sentinels.
+    """
+    measured = s.get("createdAt")
+    if isinstance(measured, str) and measured.startswith("1970-"):
+        measured = None
+    if measured is None:
+        inner = (s.get("strength") or {}).get("createdAt")
+        if isinstance(inner, str) and not inner.startswith("1970-"):
+            measured = inner
+    return measured
+
 
 def load_settings() -> dict:
     if SETTINGS_PATH.exists():
@@ -222,13 +252,6 @@ def flatten_strength(strength: list) -> list[dict]:
     for s in strength:
         ex = s.get("exercise") or {}
         st = s.get("strength") or {}
-        # History endpoint puts a sentinel "1970-01-01" in strength.createdAt;
-        # the real measurement timestamp is on the outer record.
-        measured_at = s.get("createdAt") or st.get("createdAt")
-        if isinstance(measured_at, str) and measured_at.startswith("1970-"):
-            measured_at = st.get("createdAt") or None
-            if isinstance(measured_at, str) and measured_at.startswith("1970-"):
-                measured_at = None
         out.append({
             "exercise_name": ex.get("label"),
             "exercise_code": ex.get("code"),
@@ -238,7 +261,7 @@ def flatten_strength(strength: list) -> list[dict]:
             "progress": st.get("progress"),
             "percentage_diff": st.get("percentageDiff"),
             "amount_diff_kg": st.get("amountDiff"),
-            "measured_at": measured_at,
+            "measured_at": strength_measured_at(s),
         })
     return out
 
@@ -270,8 +293,33 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--brand", help="Gym brand / Netpulse subdomain (e.g. CITYFITNESS)")
     p.add_argument("--username", help="Member email")
     p.add_argument("--password", help="Member password")
-    p.add_argument("--years", type=int, default=10, help="How many years back to scan (default: 10)")
+    p.add_argument("--years", type=int, default=10, help="How many years back to scan on a full fetch (default: 10)")
+    p.add_argument(
+        "--full",
+        action="store_true",
+        help="Ignore prior data and refetch the full --years window (default: incremental).",
+    )
     return p.parse_args()
+
+
+def load_existing_raw() -> dict:
+    """Read the prior fetch's raw payload so we can do an incremental update.
+
+    Returns {} if the file is missing or unreadable; the caller will fall
+    through to a full refetch.
+    """
+    path = DATA_DIR / "workouts_raw.json"
+    if not path.exists():
+        return {}
+    try:
+        with path.open() as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"Could not read {path.name} ({e}); falling back to full fetch.", file=sys.stderr)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
 
 
 def main() -> None:
@@ -281,19 +329,47 @@ def main() -> None:
 
     DATA_DIR.mkdir(exist_ok=True)
 
+    existing = {} if args.full else load_existing_raw()
+    existing_workouts: list = list(existing.get("workouts") or [])
+    existing_strength: list = list(existing.get("strength") or [])
+    existing_bio_age = existing.get("bio_age") or {}
+
     print(f"Logging in as {username} at {base} ...", file=sys.stderr)
     user_id, cookie = login(base, username, password)
     print(f"Logged in. userId={user_id}", file=sys.stderr)
 
-    # Fetch workouts in yearly chunks going back N years.
     end = datetime.now(timezone.utc) + timedelta(days=1)
-    earliest = end - timedelta(days=365 * args.years)
+    full_earliest = end - timedelta(days=365 * args.years)
+    overlap = timedelta(days=OVERLAP_DAYS)
 
-    all_workouts: list = []
-    seen_ids: set[str] = set()
+    # Workout fetch window: full --years on a fresh run or with --full,
+    # otherwise narrow to the latest known workout minus an overlap.
+    if existing_workouts:
+        latest_completed = max(
+            (parse_iso(w.get("completedAt")) for w in existing_workouts),
+            default=None,
+            key=lambda d: d or datetime.min.replace(tzinfo=timezone.utc),
+        )
+    else:
+        latest_completed = None
+
+    if latest_completed:
+        workout_start = max(latest_completed - overlap, full_earliest)
+        print(
+            f"Incremental: latest known workout {latest_completed.date()}, "
+            f"fetching from {workout_start.date()} ({len(existing_workouts)} cached).",
+            file=sys.stderr,
+        )
+    else:
+        workout_start = full_earliest
+        print(f"Full fetch: scanning back to {workout_start.date()}.", file=sys.stderr)
+
+    seen_ids: set[str] = {w.get("code") for w in existing_workouts if w.get("code")}
+    all_workouts: list = list(existing_workouts)
+
     cur_end = end
-    while cur_end > earliest:
-        cur_start = max(cur_end - timedelta(days=365), earliest)
+    while cur_end > workout_start:
+        cur_start = max(cur_end - timedelta(days=365), workout_start)
         print(f"Fetching {cur_start.date()} -> {cur_end.date()} ...", file=sys.stderr)
         try:
             resp = get_workouts(base, user_id, cookie, cur_start, cur_end)
@@ -313,15 +389,48 @@ def main() -> None:
         print(f"  {len(workouts)} returned, {new} new (total {len(all_workouts)})", file=sys.stderr)
         cur_end = cur_start
 
-    # Full strength-test history (every measurement per machine).
-    print("Fetching strength history ...", file=sys.stderr)
-    strength_resp = get_strength_history(user_id, cookie, earliest, end)
-    strength = strength_resp.get("strengthMeasurements", [])
-    print(f"  {len(strength)} strength records", file=sys.stderr)
+    # Strength history. Same incremental treatment: narrow to overlap window
+    # past the most recent measurement. Dedupe by (exercise code, measured_at).
+    if existing_strength:
+        latest_strength = max(
+            (parse_iso(strength_measured_at(s)) for s in existing_strength),
+            default=None,
+            key=lambda d: d or datetime.min.replace(tzinfo=timezone.utc),
+        )
+    else:
+        latest_strength = None
+    strength_start = max(latest_strength - overlap, full_earliest) if latest_strength else full_earliest
 
-    # Bio-age snapshot (latest).
+    print(
+        f"Fetching strength history {strength_start.date()} -> {end.date()} ...",
+        file=sys.stderr,
+    )
+    strength_resp = get_strength_history(user_id, cookie, strength_start, end)
+    new_strength = strength_resp.get("strengthMeasurements", [])
+
+    def _skey(s: dict) -> tuple:
+        return ((s.get("exercise") or {}).get("code"), strength_measured_at(s))
+
+    seen_strength = {_skey(s) for s in existing_strength}
+    strength = list(existing_strength)
+    new_strength_count = 0
+    for s in new_strength:
+        k = _skey(s)
+        if k in seen_strength:
+            continue
+        seen_strength.add(k)
+        strength.append(s)
+        new_strength_count += 1
+    print(
+        f"  {len(new_strength)} returned, {new_strength_count} new "
+        f"(total {len(strength)})",
+        file=sys.stderr,
+    )
+
+    # Bio-age is a single snapshot; refetch it. Keep the prior value if the
+    # call fails so we don't blank it out.
     print("Fetching bio-age ...", file=sys.stderr)
-    bio_age = get_bio_age(user_id, cookie)
+    bio_age = get_bio_age(user_id, cookie) or existing_bio_age
 
     # Raw payload for debugging / reference.
     (DATA_DIR / "workouts_raw.json").write_text(

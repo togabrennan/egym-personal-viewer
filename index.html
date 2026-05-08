@@ -99,6 +99,9 @@
         <button data-theme="light" class="toggle-btn theme-btn" title="Light mode">☀</button>
         <button data-theme="dark" class="toggle-btn theme-btn" title="Dark mode">☾</button>
       </div>
+      <div class="group">
+        <button id="refresh-btn" class="toggle-btn" title="Fetch fresh data from eGym (requires python3 serve.py)">↻ Refresh</button>
+      </div>
     </div>
   </div>
   <div class="sub" id="header-sub">Loading…</div>
@@ -285,6 +288,28 @@ function setTheme(t) {
   rerenderAll();
 }
 
+async function refreshData() {
+  const btn = document.getElementById("refresh-btn");
+  if (!btn || btn.disabled) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Refreshing…";
+  try {
+    const r = await fetch("/refresh", { method: "POST" });
+    if (r.status === 409) {
+      btn.textContent = "Already running";
+      setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 2000);
+      return;
+    }
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    location.reload();
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = original;
+    alert("Refresh failed: " + e.message + "\n\nThe refresh button only works when serving via `python3 serve.py`.");
+  }
+}
+
 async function load() {
   document.getElementById("unit-lb").addEventListener("click", () => setUnit("lb"));
   document.getElementById("unit-kg").addEventListener("click", () => setUnit("kg"));
@@ -294,6 +319,7 @@ async function load() {
   document.querySelectorAll(".theme-btn").forEach(btn => {
     btn.addEventListener("click", () => setTheme(btn.dataset.theme));
   });
+  document.getElementById("refresh-btn").addEventListener("click", refreshData);
   document.querySelectorAll(".unit-btn").forEach(b => b.classList.toggle("active", b.id === "unit-" + UNIT));
   document.querySelectorAll(".range-btn").forEach(b => b.classList.toggle("active", b.dataset.range === RANGE));
   document.querySelectorAll(".theme-btn").forEach(b => b.classList.toggle("active", b.dataset.theme === THEME));

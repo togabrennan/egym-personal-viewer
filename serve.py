@@ -33,6 +33,10 @@ HERE = Path(__file__).resolve().parent
 DATA = HERE / "data" / "workouts.json"
 REFETCH_INTERVAL_SECONDS = 2 * 60 * 60
 
+# Serializes fetches across the periodic loop and the manual /refresh endpoint
+# so two fetches can't run concurrently and trip over the same data files.
+FETCH_LOCK = threading.Lock()
+
 
 def is_stale() -> tuple[bool, str]:
     if not DATA.exists():
@@ -113,14 +117,53 @@ def refetch_loop() -> None:
         time.sleep(REFETCH_INTERVAL_SECONDS)
         try:
             ok, reason = should_refetch()
-            if ok:
+            if not ok:
+                print(f"[serve] skipping scheduled refetch: {reason}", file=sys.stderr)
+                continue
+            if not FETCH_LOCK.acquire(blocking=False):
+                print("[serve] skipping scheduled refetch: another fetch is running", file=sys.stderr)
+                continue
+            try:
                 print(f"[serve] refetching: {reason}", file=sys.stderr)
                 run_fetch()
-            else:
-                print(f"[serve] skipping scheduled refetch: {reason}", file=sys.stderr)
+            finally:
+                FETCH_LOCK.release()
         except Exception as e:
             # Never let a bad tick kill the loop — we'll try again next interval.
             print(f"[serve] refetch tick failed: {e!r}; will retry next interval", file=sys.stderr)
+
+
+class ViewerHandler(http.server.SimpleHTTPRequestHandler):
+    """Static file server plus a POST /refresh endpoint.
+
+    /refresh runs fetch.py synchronously and returns 200 on success or 409 if
+    a fetch is already in flight. Auth is intentionally not handled here —
+    front the server with a reverse proxy (nginx/caddy basic-auth, Tailscale,
+    etc.) before exposing it beyond localhost.
+    """
+
+    def _json(self, status: int, payload: dict) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802 — http.server API
+        if self.path.split("?", 1)[0] != "/refresh":
+            self.send_error(404, "Not found")
+            return
+        if not FETCH_LOCK.acquire(blocking=False):
+            self._json(409, {"status": "busy", "message": "a fetch is already running"})
+            return
+        try:
+            print("[serve] refresh requested via /refresh", file=sys.stderr)
+            run_fetch()
+        finally:
+            FETCH_LOCK.release()
+        self._json(200, {"status": "ok"})
 
 
 def main() -> None:
@@ -142,9 +185,8 @@ def main() -> None:
         print(f"[serve] periodic refetch armed (every {hours:g}h while today's workout is incomplete)", file=sys.stderr)
 
     # Serve from the project root so index.html can read data/workouts.json.
-    handler = http.server.SimpleHTTPRequestHandler
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("", args.port), handler) as httpd:
+    with socketserver.TCPServer(("", args.port), ViewerHandler) as httpd:
         url = f"http://localhost:{args.port}/"
         print(f"[serve] viewer at {url}  (Ctrl+C to stop)", file=sys.stderr)
         try:

@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import os
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -177,6 +179,25 @@ def _attr(attrs: dict | None, key: str) -> tuple[object, object]:
     return None, None
 
 
+def workout_richness(w: dict) -> tuple[int, int]:
+    """How much detail a workout carries, as (total sets, exercise count).
+
+    Used to decide which copy to keep when the API returns the same workout
+    code with differing detail. A workout fetched mid-session has only the
+    sets done so far; later it grows. But the API also intermittently returns
+    a *truncated* copy of a finished workout — fewer exercises/sets than it
+    gave moments earlier. Keeping the richer copy lets mid-session growth win
+    while refusing to clobber complete data with a flaky partial response.
+    """
+    exercises = w.get("exercises") or []
+    total_sets = 0
+    for ex in exercises:
+        sets = (ex.get("attributes") or {}).get("sets_of_reps_and_weight_or_duration_and_weight")
+        if isinstance(sets, list):
+            total_sets += len(sets)
+    return total_sets, len(exercises)
+
+
 def flatten_workouts(workouts: list) -> list[dict]:
     """Flatten nested workout/exercise structure into one row per set (or per exercise if no sets)."""
     rows = []
@@ -266,6 +287,37 @@ def flatten_strength(strength: list) -> list[dict]:
     return out
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write text to path atomically.
+
+    Writes to a temp file in the same directory, fsyncs, then os.replace()s
+    it into place — an atomic rename on POSIX. If the process is interrupted
+    (Ctrl+C) or crashes mid-write, the existing file is left untouched rather
+    than truncated to garbage, and any concurrent reader (the viewer fetching
+    workouts.json) always sees a complete file, never a partial one.
+    """
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", newline="") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        # mkstemp creates 0600; match what a plain open() would produce so the
+        # served files stay readable as before (e.g. 0644 under a 022 umask).
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(tmp, 0o666 & ~umask)
+        os.replace(tmp, path)
+    except BaseException:
+        # Includes KeyboardInterrupt: drop the half-written temp, keep the
+        # prior good file intact, and re-raise.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_csv(path: Path, rows: list[dict]) -> None:
     if not rows:
         return
@@ -282,10 +334,11 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         "exercise_library", "workout_created_at",
     ]
     cols = [c for c in preferred if c in cols] + [c for c in cols if c not in preferred]
-    with path.open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=cols)
-        w.writeheader()
-        w.writerows(rows)
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=cols)
+    w.writeheader()
+    w.writerows(rows)
+    atomic_write_text(path, buf.getvalue())
 
 
 def parse_args() -> argparse.Namespace:
@@ -354,7 +407,15 @@ def main() -> None:
         latest_completed = None
 
     if latest_completed:
-        workout_start = max(latest_completed - overlap, full_earliest)
+        # Floor the anchor to the start of its day. The API filters a workout's
+        # exercises/sets by completedAfter, so a mid-session anchor returns that
+        # day's workout with everything before the anchor chopped off. Because
+        # workouts tend to happen around the same time daily, latest-minus-overlap
+        # reliably lands inside the session ~OVERLAP_DAYS ago and truncates it.
+        # Midnight is safely before any session.
+        workout_start = max(latest_completed - overlap, full_earliest).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
         print(
             f"Incremental: latest known workout {latest_completed.date()}, "
             f"fetching from {workout_start.date()} ({len(existing_workouts)} cached).",
@@ -364,8 +425,18 @@ def main() -> None:
         workout_start = full_earliest
         print(f"Full fetch: scanning back to {workout_start.date()}.", file=sys.stderr)
 
-    seen_ids: set[str] = {w.get("code") for w in existing_workouts if w.get("code")}
-    all_workouts: list = list(existing_workouts)
+    # Index by workout code so a fresh API copy can update a cached one. A
+    # workout fetched mid-session lands here with only the sets done so far;
+    # a later run returns the same code with the rest attached. We take the
+    # incoming copy only when it's at least as complete as the cached one
+    # (see workout_richness) — the API sometimes returns a truncated copy of a
+    # finished workout, and an unconditional overwrite would clobber good data
+    # and, once the workout ages past the refetch window, freeze it wrong.
+    by_code: dict = {w.get("code"): w for w in existing_workouts if w.get("code")}
+    fetched_codes: set = set()
+    new_count = 0
+    refreshed_count = 0
+    kept_count = 0
 
     cur_end = end
     while cur_end > workout_start:
@@ -378,16 +449,35 @@ def main() -> None:
             cur_end = cur_start
             continue
         workouts = resp.get("workouts", []) if isinstance(resp, dict) else (resp or [])
-        new = 0
+        page_new = 0
+        page_refreshed = 0
+        page_kept = 0
         for w in workouts:
             wid = w.get("code")
-            if wid in seen_ids:
+            if not wid or wid in fetched_codes:
                 continue
-            seen_ids.add(wid)
-            all_workouts.append(w)
-            new += 1
-        print(f"  {len(workouts)} returned, {new} new (total {len(all_workouts)})", file=sys.stderr)
+            fetched_codes.add(wid)
+            if wid in by_code:
+                if workout_richness(w) >= workout_richness(by_code[wid]):
+                    by_code[wid] = w
+                    page_refreshed += 1
+                else:
+                    page_kept += 1  # incoming is less complete — keep cached
+            else:
+                by_code[wid] = w
+                page_new += 1
+        new_count += page_new
+        refreshed_count += page_refreshed
+        kept_count += page_kept
+        kept_note = f", {page_kept} kept (stale copy ignored)" if page_kept else ""
+        print(
+            f"  {len(workouts)} returned, {page_new} new, {page_refreshed} refreshed{kept_note} "
+            f"(total {len(by_code)})",
+            file=sys.stderr,
+        )
         cur_end = cur_start
+
+    all_workouts: list = list(by_code.values())
 
     # Strength history. Same incremental treatment: narrow to overlap window
     # past the most recent measurement. Dedupe by (exercise code, measured_at).
@@ -433,8 +523,9 @@ def main() -> None:
     bio_age = get_bio_age(user_id, cookie) or existing_bio_age
 
     # Raw payload for debugging / reference.
-    (DATA_DIR / "workouts_raw.json").write_text(
-        json.dumps({"workouts": all_workouts, "strength": strength, "bio_age": bio_age}, indent=2)
+    atomic_write_text(
+        DATA_DIR / "workouts_raw.json",
+        json.dumps({"workouts": all_workouts, "strength": strength, "bio_age": bio_age}, indent=2),
     )
 
     # Flattened forms.
@@ -443,7 +534,7 @@ def main() -> None:
 
     write_csv(DATA_DIR / "workouts.csv", rows)
 
-    (DATA_DIR / "workouts.json").write_text(json.dumps({
+    atomic_write_text(DATA_DIR / "workouts.json", json.dumps({
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "user_id": user_id,
         "brand": brand,

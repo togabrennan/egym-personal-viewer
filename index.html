@@ -84,6 +84,7 @@
     <div class="row toolbar">
       <div class="group">
         <span class="muted" style="font-size:12px">Range:</span>
+        <button data-range="today" class="toggle-btn range-btn">Today</button>
         <button data-range="7d" class="toggle-btn range-btn">7d</button>
         <button data-range="30d" class="toggle-btn range-btn">30d</button>
         <button data-range="90d" class="toggle-btn range-btn">90d</button>
@@ -98,6 +99,10 @@
         <span class="muted" style="font-size:12px">Theme:</span>
         <button data-theme="light" class="toggle-btn theme-btn" title="Light mode">☀</button>
         <button data-theme="dark" class="toggle-btn theme-btn" title="Dark mode">☾</button>
+      </div>
+      <div class="group">
+        <button id="export-btn" class="toggle-btn" title="Download full workout history as a Markdown file (for LLM ingestion)">↓ Export MD</button>
+        <button id="refresh-btn" class="toggle-btn" title="Fetch fresh data from eGym (requires python3 serve.py)">↻ Refresh</button>
       </div>
     </div>
   </div>
@@ -196,10 +201,21 @@ let THEME = initialTheme();
 document.documentElement.setAttribute("data-theme", THEME);
 
 // Time range state.
-const RANGE_DAYS = { "7d": 7, "30d": 30, "90d": 90, "all": null };
-const RANGE_LABELS = { "7d": "Last 7 days", "30d": "Last 30 days", "90d": "Last 90 days", "all": "All time" };
+const RANGE_DAYS = { "today": 0, "7d": 7, "30d": 30, "90d": 90, "all": null };
+const RANGE_LABELS = { "today": "Today", "7d": "Last 7 days", "30d": "Last 30 days", "90d": "Last 90 days", "all": "All time" };
 let RANGE = localStorage.getItem("egym_range") || "30d";
 if (!(RANGE in RANGE_DAYS)) RANGE = "30d";
+
+function rangeCutoff() {
+  const days = RANGE_DAYS[RANGE];
+  if (days == null) return -Infinity;
+  if (days === 0) {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+  return Date.now() - days * 86400e3;
+}
 
 const fmt = (n, d=1) => n == null ? "" : Number(n).toLocaleString(undefined, {maximumFractionDigits: d});
 const fmtDate = s => s ? new Date(s).toLocaleDateString(undefined, {month:"short", day:"numeric", year:"numeric"}) : "";
@@ -214,11 +230,8 @@ const isMachine = r => r.exercise_source === "fitness_machine";
 const normName = s => (s || "").toLowerCase().replace(/biceps/g, "bicep").replace(/[^a-z]/g, "");
 
 function inRange(row) {
-  const days = RANGE_DAYS[RANGE];
-  if (days == null) return true;
-  const cutoff = Date.now() - days * 86400e3;
   const t = new Date(row.exercise_completed_at || row.workout_completed_at).getTime();
-  return t >= cutoff;
+  return t >= rangeCutoff();
 }
 
 let ALL_ROWS = null;
@@ -248,8 +261,10 @@ function rerenderAll() {
 
 function updateHeader(rows) {
   const gymDays = new Set(rows.map(r => dayKey(r.exercise_completed_at || r.workout_completed_at))).size;
+  const dayWord = gymDays === 1 ? "day" : "days";
+  const phrase = RANGE === "today" ? "today" : `in ${RANGE_LABELS[RANGE].toLowerCase()}`;
   document.getElementById("header-sub").innerHTML =
-    `Brand: <strong>${BRAND}</strong> · ${gymDays} gym days in ${RANGE_LABELS[RANGE].toLowerCase()} · Machines only · Last sync ${fmtDateTime(GENERATED_AT)}`;
+    `Brand: <strong>${BRAND}</strong> · ${gymDays} gym ${dayWord} ${phrase} · Machines only · Last sync ${fmtDateTime(GENERATED_AT)}`;
   document.getElementById("ap-title").textContent = `Activity Points — ${RANGE_LABELS[RANGE]}`;
   document.getElementById("pr-title").textContent = `Volume Records — ${RANGE_LABELS[RANGE]} (ranked by best-day volume)`;
 }
@@ -285,6 +300,238 @@ function setTheme(t) {
   rerenderAll();
 }
 
+async function refreshData() {
+  const btn = document.getElementById("refresh-btn");
+  if (!btn || btn.disabled) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Refreshing…";
+  try {
+    const r = await fetch("/refresh", { method: "POST" });
+    if (r.status === 409) {
+      btn.textContent = "Already running";
+      setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 2000);
+      return;
+    }
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    location.reload();
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = original;
+    alert("Refresh failed: " + e.message + "\n\nThe refresh button only works when serving via `python3 serve.py`.");
+  }
+}
+
+function exportMarkdown() {
+  if (!ALL_ROWS) return;
+  const u = unitLabel();
+  const rows = ALL_ROWS;
+
+  const days = new Set(rows.map(r => dayKey(r.exercise_completed_at || r.workout_completed_at)));
+  const withWeight = rows.filter(r => r.weight != null);
+  const machineNames = new Set(rows.map(r => r.exercise_name));
+  const totalSets = withWeight.length;
+  const totalVolumeKg = withWeight.reduce((s, r) => s + (Number(r.weight) || 0) * (Number(r.reps) || 0), 0);
+  const apSeen = new Set();
+  let totalAP = 0;
+  for (const r of rows) {
+    const k = r.workout_code + "|" + r.exercise_code;
+    if (apSeen.has(k)) continue;
+    apSeen.add(k);
+    totalAP += Number(r.activity_points) || 0;
+  }
+  const dateList = rows.map(r => r.workout_completed_at).filter(Boolean).sort();
+  const firstDate = dateList[0];
+  const lastDate = dateList[dateList.length - 1];
+
+  const L = [];
+  L.push(`# eGym Workout Export`, ``);
+  L.push(`- **Brand:** ${BRAND}`);
+  L.push(`- **Data sync:** ${GENERATED_AT}`);
+  L.push(`- **Exported:** ${new Date().toISOString()}`);
+  L.push(`- **Units:** weights shown in **${u}** (eGym stores natively in kg)`);
+  L.push(`- **Scope:** fitness machines only (cardio not included)`);
+  L.push(``);
+
+  L.push(`## Snapshot (all-time)`, ``);
+  L.push(`- Gym days: **${days.size}**${firstDate ? ` (first: ${fmtDate(firstDate)}, last: ${fmtDate(lastDate)})` : ""}`);
+  L.push(`- Machines used: **${machineNames.size}**`);
+  L.push(`- Total working sets: **${totalSets}**`);
+  L.push(`- Total volume lifted: **${fmt(convert(totalVolumeKg), 0)} ${u}** (weight × reps)`);
+  L.push(`- Activity points: **${fmt(totalAP, 0)}**`);
+  L.push(``);
+
+  if (BIO_AGE && Object.keys(BIO_AGE).length) {
+    L.push(`## Bio Age (eGym Genius assessment)`, ``);
+    const sections = [
+      ["Total", BIO_AGE.totalDetails],
+      ["Cardio", BIO_AGE.cardioDetails],
+      ["Metabolic", BIO_AGE.metabolicDetails],
+      ["Muscle (Strength)", BIO_AGE.muscleDetails],
+      ["Flexibility", BIO_AGE.flexibilityDetails],
+    ];
+    for (const [title, sec] of sections) {
+      if (!sec) continue;
+      L.push(`### ${title}`, ``);
+      let wroteAny = false;
+      for (const [k, v] of Object.entries(sec)) {
+        if (!v || typeof v !== "object" || v.value == null) continue;
+        wroteAny = true;
+        const extra = [];
+        if (v.progress) extra.push(`trend ${v.progress}`);
+        if (v.amountDiff != null && v.amountDiff !== 0) extra.push(`${v.amountDiff > 0 ? "+" : ""}${v.amountDiff}`);
+        if (v.percentageDiff != null && v.percentageDiff !== 0) extra.push(`${v.percentageDiff > 0 ? "+" : ""}${fmt(v.percentageDiff, 1)}%`);
+        if (v.musclesState) extra.push(v.musclesState.toLowerCase());
+        if (v.createdAt) extra.push(`measured ${fmtDate(v.createdAt)}`);
+        const suffix = extra.length ? ` _(${extra.join(", ")})_` : "";
+        L.push(`- **${k}:** ${v.value}${suffix}`);
+      }
+      if (!wroteAny) L.pop();
+      L.push(``);
+    }
+  }
+
+  const strengthLatest = Object.values(STRENGTH_BY_MACHINE)
+    .filter(s => s.one_rep_max_kg != null)
+    .sort((a, b) => b.one_rep_max_kg - a.one_rep_max_kg);
+  if (strengthLatest.length) {
+    L.push(`## 1RM Strength — Latest`, ``);
+    L.push(`| Machine | Body Region | 1RM (${u}) | Trend | Change | Last Measured |`);
+    L.push(`|---|---|---:|:---:|---|---|`);
+    for (const s of strengthLatest) {
+      const arrow = s.progress === "up" ? "▲" : s.progress === "down" ? "▼" : "·";
+      const cur = s.one_rep_max_kg;
+      const pct = s.percentage_diff;
+      const kgDelta = (pct != null && cur != null && (100 + pct) !== 0)
+        ? cur * pct / (100 + pct)
+        : s.amount_diff_kg;
+      const change = (kgDelta != null && pct != null)
+        ? `${kgDelta > 0 ? "+" : ""}${fmt(convert(kgDelta), 1)} ${u} (${pct > 0 ? "+" : ""}${fmt(pct, 1)}%)`
+        : "—";
+      L.push(`| ${s.exercise_name || ""} | ${(s.body_region || "").toLowerCase()} | ${fmt(convert(cur), 1)} | ${arrow} ${s.progress || ""} | ${change} | ${fmtDate(s.measured_at)} |`);
+    }
+    L.push(``);
+  }
+
+  const histEntries = Object.entries(STRENGTH_HISTORY).filter(([, arr]) => arr.length > 0);
+  if (histEntries.length) {
+    L.push(`## 1RM Strength — Full History`, ``);
+    histEntries.sort((a, b) => {
+      const av = a[1][a[1].length - 1]?.one_rep_max_kg || 0;
+      const bv = b[1][b[1].length - 1]?.one_rep_max_kg || 0;
+      return bv - av;
+    });
+    for (const [, arr] of histEntries) {
+      const last = arr[arr.length - 1];
+      const region = last.body_region ? ` _(${last.body_region.toLowerCase()})_` : "";
+      L.push(`### ${last.exercise_name}${region}`, ``);
+      L.push(`| Date | 1RM (${u}) |`, `|---|---:|`);
+      for (const s of arr) {
+        if (s.one_rep_max_kg == null) continue;
+        L.push(`| ${fmtDate(s.measured_at)} | ${fmt(convert(s.one_rep_max_kg), 1)} |`);
+      }
+      L.push(``);
+    }
+  }
+
+  const perMachine = new Map();
+  for (const r of rows) {
+    if (r.weight == null) continue;
+    if (!perMachine.has(r.exercise_name)) perMachine.set(r.exercise_name, []);
+    perMachine.get(r.exercise_name).push(r);
+  }
+  const machineList = [...perMachine.entries()].sort((a, b) => b[1].length - a[1].length);
+  if (machineList.length) {
+    L.push(`## Per-Machine Training History`, ``);
+    L.push(`Every recorded working set, oldest first.`, ``);
+    for (const [name, sets] of machineList) {
+      sets.sort((a, b) => new Date(a.exercise_completed_at) - new Date(b.exercise_completed_at));
+      const totVolKg = sets.reduce((s, r) => s + (Number(r.weight) || 0) * (Number(r.reps) || 0), 0);
+      let heaviestKg = 0;
+      for (const r of sets) {
+        const w = Number(r.weight) || 0;
+        if (w > heaviestKg) heaviestKg = w;
+      }
+      const dayCount = new Set(sets.map(r => dayKey(r.exercise_completed_at))).size;
+      const dayVol = new Map();
+      for (const r of sets) {
+        const dk = dayKey(r.exercise_completed_at);
+        const v = (Number(r.weight) || 0) * (Number(r.reps) || 0);
+        const cur = dayVol.get(dk) || { date: r.exercise_completed_at, vol: 0 };
+        cur.vol += v;
+        dayVol.set(dk, cur);
+      }
+      let best = null;
+      for (const d of dayVol.values()) if (!best || d.vol > best.vol) best = d;
+      L.push(`### ${name}`, ``);
+      L.push(`${sets.length} ${sets.length === 1 ? "set" : "sets"} · ${dayCount} ${dayCount === 1 ? "day" : "days"} · total ${fmt(convert(totVolKg), 0)} ${u} · heaviest ${fmt(convert(heaviestKg), 1)} ${u}${best ? ` · best day ${fmtDate(best.date)} (${fmt(convert(best.vol), 0)} ${u})` : ""}`, ``);
+      L.push(`| Date | Weight (${u}) | Reps | Volume (${u}) |`, `|---|---:|---:|---:|`);
+      for (const r of sets) {
+        const w = Number(r.weight) || 0;
+        const reps = Number(r.reps) || 0;
+        L.push(`| ${fmtDate(r.exercise_completed_at)} | ${fmt(convert(w), 1)} | ${reps} | ${fmt(convert(w * reps), 0)} |`);
+      }
+      L.push(``);
+    }
+  }
+
+  const byDay = new Map();
+  const apSeenDay = new Set();
+  for (const r of rows) {
+    const dk = dayKey(r.exercise_completed_at || r.workout_completed_at);
+    if (!byDay.has(dk)) byDay.set(dk, {
+      date: r.exercise_completed_at || r.workout_completed_at,
+      exercises: new Map(),
+      ap: 0, totalSets: 0, totalVolume: 0,
+    });
+    const d = byDay.get(dk);
+    const name = r.exercise_name;
+    if (name) {
+      if (!d.exercises.has(name)) d.exercises.set(name, { sets: 0, volume: 0, heaviest: 0 });
+      const e = d.exercises.get(name);
+      if (r.weight != null) {
+        const w = Number(r.weight) || 0;
+        const reps = Number(r.reps) || 0;
+        e.sets += 1;
+        e.volume += w * reps;
+        if (w > e.heaviest) e.heaviest = w;
+        d.totalSets += 1;
+        d.totalVolume += w * reps;
+      }
+    }
+    const apKey = r.workout_code + "|" + r.exercise_code;
+    if (!apSeenDay.has(apKey)) {
+      apSeenDay.add(apKey);
+      d.ap += Number(r.activity_points) || 0;
+    }
+  }
+  if (byDay.size) {
+    L.push(`## Daily Workout Log`, ``);
+    L.push(`Every gym day, most recent first.`, ``);
+    const sortedDays = [...byDay.entries()].sort((a, b) => b[0].localeCompare(a[0]));
+    for (const [, w] of sortedDays) {
+      L.push(`### ${fmtDayLong(w.date)}`, ``);
+      L.push(`${w.exercises.size} ${w.exercises.size === 1 ? "machine" : "machines"} · ${w.totalSets} ${w.totalSets === 1 ? "set" : "sets"} · ${fmt(convert(w.totalVolume), 0)} ${u} · ${fmt(w.ap, 0)} AP`, ``);
+      for (const [name, e] of w.exercises) {
+        if (e.sets === 0) continue;
+        L.push(`- **${name}** — ${e.sets} ${e.sets === 1 ? "set" : "sets"}, ${fmt(convert(e.volume), 0)} ${u} volume, heaviest ${fmt(convert(e.heaviest), 1)} ${u}`);
+      }
+      L.push(``);
+    }
+  }
+
+  const md = L.join("\n");
+  const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `egym-workouts-${new Date().toISOString().slice(0,10)}.md`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 async function load() {
   document.getElementById("unit-lb").addEventListener("click", () => setUnit("lb"));
   document.getElementById("unit-kg").addEventListener("click", () => setUnit("kg"));
@@ -294,6 +541,8 @@ async function load() {
   document.querySelectorAll(".theme-btn").forEach(btn => {
     btn.addEventListener("click", () => setTheme(btn.dataset.theme));
   });
+  document.getElementById("refresh-btn").addEventListener("click", refreshData);
+  document.getElementById("export-btn").addEventListener("click", exportMarkdown);
   document.querySelectorAll(".unit-btn").forEach(b => b.classList.toggle("active", b.id === "unit-" + UNIT));
   document.querySelectorAll(".range-btn").forEach(b => b.classList.toggle("active", b.dataset.range === RANGE));
   document.querySelectorAll(".theme-btn").forEach(b => b.classList.toggle("active", b.dataset.theme === THEME));
@@ -511,8 +760,7 @@ function renderMachineCharts(rows, machine) {
   }));
 
   // 1RM strength-test markers, respecting the active time range.
-  const rangeDays = RANGE_DAYS[RANGE];
-  const cutoff = rangeDays == null ? -Infinity : Date.now() - rangeDays * 86400e3;
+  const cutoff = rangeCutoff();
   const history = STRENGTH_HISTORY[normName(machine)] || [];
   const rmData = history
     .filter(s => s.one_rep_max_kg != null && s.measured_at)

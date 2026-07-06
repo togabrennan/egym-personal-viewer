@@ -225,6 +225,15 @@ const dayKey = s => {
   const d = new Date(s);
   return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
 };
+// Monday of the timestamp's local week, as YYYY-MM-DD (week bucket key).
+const isoWeekStart = s => {
+  const d = new Date(s);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - (d.getDay() + 6) % 7);
+  return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+};
+// Format a YYYY-MM-DD key as a date without UTC-parsing skew.
+const fmtDayKey = k => fmtDate(k + "T00:00:00");
 const isMachine = r => r.exercise_source === "fitness_machine";
 // API spells the machine "Biceps Curl" in workouts but "Bicep curl" in strength tests.
 const normName = s => (s || "").toLowerCase().replace(/biceps/g, "bicep").replace(/[^a-z]/g, "");
@@ -391,6 +400,114 @@ function exportMarkdown() {
     }
   }
 
+  const progression = Object.values(STRENGTH_HISTORY)
+    .map(arr => arr.filter(s => s.one_rep_max_kg != null))
+    .filter(arr => arr.length > 0)
+    .sort((a, b) => b[b.length - 1].one_rep_max_kg - a[a.length - 1].one_rep_max_kg);
+  if (progression.length) {
+    L.push(`## Strength Progression Summary`, ``);
+    L.push(`Machine-measured 1RM per machine, first test vs latest.`, ``);
+    L.push(`| Machine | Region | First 1RM (${u}) | Latest 1RM (${u}) | Change | Best Ever (${u}) | Tests |`);
+    L.push(`|---|---|---:|---:|---|---:|---:|`);
+    for (const arr of progression) {
+      const first = arr[0];
+      const latest = arr[arr.length - 1];
+      let best = first;
+      for (const s of arr) if (s.one_rep_max_kg > best.one_rep_max_kg) best = s;
+      let change = "—";
+      if (arr.length >= 2) {
+        const deltaKg = latest.one_rep_max_kg - first.one_rep_max_kg;
+        const pct = first.one_rep_max_kg !== 0 ? (deltaKg / first.one_rep_max_kg) * 100 : null;
+        change = `${deltaKg > 0 ? "+" : ""}${fmt(convert(deltaKg), 1)} ${u}`
+          + (pct != null ? ` (${pct > 0 ? "+" : ""}${fmt(pct, 1)}%)` : "");
+      }
+      L.push(`| ${latest.exercise_name || ""} | ${(latest.body_region || "").toLowerCase()} | ${fmt(convert(first.one_rep_max_kg), 1)} (${fmtDate(first.measured_at)}) | ${fmt(convert(latest.one_rep_max_kg), 1)} (${fmtDate(latest.measured_at)}) | ${change} | ${fmt(convert(best.one_rep_max_kg), 1)} (${fmtDate(best.measured_at)}) | ${arr.length} |`);
+    }
+    L.push(``);
+  }
+
+  // Machine -> body region, joined through normName (strength tests and
+  // workout rows spell machine names differently).
+  const regionByMachine = {};
+  for (const [k, arr] of Object.entries(STRENGTH_HISTORY)) {
+    const withRegion = arr.find(s => s.body_region);
+    if (withRegion) regionByMachine[k] = withRegion.body_region.toUpperCase();
+  }
+
+  const byWeek = new Map();
+  const apSeenWeek = new Set();
+  let otherVolKg = 0;
+  for (const r of rows) {
+    const ts = r.exercise_completed_at || r.workout_completed_at;
+    const wk = isoWeekStart(ts);
+    if (!byWeek.has(wk)) byWeek.set(wk, {
+      days: new Set(), sets: 0, vol: 0,
+      regions: { UPPER: 0, LOWER: 0, CORE: 0, OTHER: 0 }, ap: 0,
+    });
+    const b = byWeek.get(wk);
+    b.days.add(dayKey(ts));
+    if (r.weight != null) {
+      const v = (Number(r.weight) || 0) * (Number(r.reps) || 0);
+      b.sets += 1;
+      b.vol += v;
+      const region = regionByMachine[normName(r.exercise_name)] || "OTHER";
+      b.regions[region] += v;
+      if (region === "OTHER") otherVolKg += v;
+    }
+    const apKey = r.workout_code + "|" + r.exercise_code;
+    if (!apSeenWeek.has(apKey)) {
+      apSeenWeek.add(apKey);
+      b.ap += Number(r.activity_points) || 0;
+    }
+  }
+  const weekList = [...byWeek.entries()].filter(([, b]) => b.sets > 0).sort((a, b) => a[0].localeCompare(b[0]));
+  if (weekList.length) {
+    const hasOther = otherVolKg > 0;
+    L.push(`## Weekly Volume Summary`, ``);
+    L.push(`Volume = weight × reps, split by body region. Weeks start Monday; weeks with no working sets are omitted.`, ``);
+    L.push(`| Week of | Gym Days | Sets | Volume (${u}) | Upper | Lower | Core |${hasOther ? " Other |" : ""} Activity Pts |`);
+    L.push(`|---|---:|---:|---:|---:|---:|---:|${hasOther ? "---:|" : ""}---:|`);
+    for (const [wk, b] of weekList) {
+      const other = hasOther ? ` ${fmt(convert(b.regions.OTHER), 0)} |` : "";
+      L.push(`| ${fmtDayKey(wk)} | ${b.days.size} | ${b.sets} | ${fmt(convert(b.vol), 0)} | ${fmt(convert(b.regions.UPPER), 0)} | ${fmt(convert(b.regions.LOWER), 0)} | ${fmt(convert(b.regions.CORE), 0)} |${other} ${fmt(b.ap, 0)} |`);
+    }
+    L.push(``);
+  }
+
+  const perMachine = new Map();
+  for (const r of rows) {
+    if (r.weight == null) continue;
+    if (!perMachine.has(r.exercise_name)) perMachine.set(r.exercise_name, []);
+    perMachine.get(r.exercise_name).push(r);
+  }
+  const machineList = [...perMachine.entries()].sort((a, b) => b[1].length - a[1].length);
+
+  if (machineList.length) {
+    L.push(`## Per-Machine Weekly Progression`, ``);
+    L.push(`Weekly top working weight, estimated 1RM, and volume per machine. Est. 1RM is Epley (weight × (1 + reps/30)) from the best working set — an estimate, distinct from the machine-measured 1RM above.`, ``);
+    for (const [name, sets] of machineList) {
+      const byWk = new Map();
+      for (const r of sets) {
+        const wk = isoWeekStart(r.exercise_completed_at || r.workout_completed_at);
+        if (!byWk.has(wk)) byWk.set(wk, { sets: 0, top: 0, e1rm: 0, vol: 0 });
+        const b = byWk.get(wk);
+        const w = Number(r.weight) || 0;
+        const reps = Number(r.reps) || 0;
+        b.sets += 1;
+        if (w > b.top) b.top = w;
+        const e = w * (1 + reps / 30);
+        if (e > b.e1rm) b.e1rm = e;
+        b.vol += w * reps;
+      }
+      L.push(`### ${name}`, ``);
+      L.push(`| Week of | Sets | Top Weight (${u}) | Est. 1RM (${u}) | Volume (${u}) |`, `|---|---:|---:|---:|---:|`);
+      for (const [wk, b] of [...byWk.entries()].sort((a, b2) => a[0].localeCompare(b2[0]))) {
+        L.push(`| ${fmtDayKey(wk)} | ${b.sets} | ${fmt(convert(b.top), 1)} | ${fmt(convert(b.e1rm), 1)} | ${fmt(convert(b.vol), 0)} |`);
+      }
+      L.push(``);
+    }
+  }
+
   const strengthLatest = Object.values(STRENGTH_BY_MACHINE)
     .filter(s => s.one_rep_max_kg != null)
     .sort((a, b) => b.one_rep_max_kg - a.one_rep_max_kg);
@@ -434,13 +551,6 @@ function exportMarkdown() {
     }
   }
 
-  const perMachine = new Map();
-  for (const r of rows) {
-    if (r.weight == null) continue;
-    if (!perMachine.has(r.exercise_name)) perMachine.set(r.exercise_name, []);
-    perMachine.get(r.exercise_name).push(r);
-  }
-  const machineList = [...perMachine.entries()].sort((a, b) => b[1].length - a[1].length);
   if (machineList.length) {
     L.push(`## Per-Machine Training History`, ``);
     L.push(`Every recorded working set, oldest first.`, ``);

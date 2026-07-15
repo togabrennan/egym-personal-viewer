@@ -300,6 +300,25 @@ function applyChartDefaultsFromTheme() {
   Chart.defaults.borderColor = cssVar("--grid", "#2a2f3a");
 }
 
+// Day-unit time axis whose tick skipping is anchored at the LAST tick, so the
+// most recent day always keeps its label (Chart.js autoSkip anchors at the
+// first tick and can drop today's).
+function dayTimeAxis() {
+  return {
+    type: "time",
+    time: { unit: "day" },
+    grid: { display: false },
+    ticks: { autoSkip: false },
+    afterBuildTicks: axis => {
+      const ticks = axis.ticks;
+      if (ticks.length < 3) return;
+      const maxLabels = Math.max(2, Math.floor(axis.chart.width / 35));
+      const step = Math.ceil(ticks.length / maxLabels);
+      axis.ticks = ticks.filter((_, i) => (ticks.length - 1 - i) % step === 0);
+    },
+  };
+}
+
 function setTheme(t) {
   THEME = t;
   localStorage.setItem("egym_theme", t);
@@ -820,7 +839,7 @@ function renderActivityPoints(rows) {
     options: {
       responsive: true, maintainAspectRatio: false,
       scales: {
-        x: { type: "time", time: { unit: "day" }, grid: { display: false } },
+        x: dayTimeAxis(),
         y: { beginAtZero: true, grid: { color: cssVar("--grid", "#2a2f3a") } },
       },
       plugins: { legend: { display: false } },
@@ -908,7 +927,7 @@ function renderMachineCharts(rows, machine) {
     options: {
       responsive: true, maintainAspectRatio: false,
       scales: {
-        x: { type: "time", time: { unit: "day" }, grid: { display: false } },
+        x: dayTimeAxis(),
         y: { beginAtZero: false, title: { display: true, text: `Weight (${unitLabel()})` }, grid: { color: cssVar("--grid", "#2a2f3a") } },
       },
       plugins: {
@@ -951,7 +970,7 @@ function renderMachineCharts(rows, machine) {
     options: {
       responsive: true, maintainAspectRatio: false,
       scales: {
-        x: { type: "time", time: { unit: "day" }, grid: { display: false } },
+        x: dayTimeAxis(),
         y: { beginAtZero: true, title: { display: true, text: `Volume (${unitLabel()})` }, grid: { color: cssVar("--grid", "#2a2f3a") } },
       },
       plugins: {

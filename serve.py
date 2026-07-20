@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Convenience launcher: auto-fetch if data/workouts.json is stale, then serve.
+"""Convenience launcher: auto-fetch if data/workouts.json needs refresh, then serve.
 
 Fetches fresh data only if `data/workouts.json` is missing or its
-`generated_at` timestamp is from a day earlier than today (local time).
+`generated_at` timestamp is from a day earlier than today (local time), or
+if today's data still needs a scheduled retry.
 Pass `--force` to always fetch, or `--no-fetch` to skip the staleness
 check entirely.
 
@@ -38,7 +39,7 @@ REFETCH_INTERVAL_SECONDS = 2 * 60 * 60
 FETCH_LOCK = threading.Lock()
 
 
-def is_stale() -> tuple[bool, str]:
+def is_stale(now: datetime | None = None) -> tuple[bool, str]:
     if not DATA.exists():
         return True, "no data/workouts.json yet"
     try:
@@ -47,7 +48,7 @@ def is_stale() -> tuple[bool, str]:
             return True, "workouts.json missing generated_at"
         # Compare date portion only (local time). Works for RFC3339/ISO 8601.
         gen_date = datetime.fromisoformat(gen.replace("Z", "+00:00")).astimezone().date()
-        today = datetime.now().astimezone().date()
+        today = (now or datetime.now().astimezone()).astimezone().date()
         if gen_date < today:
             return True, f"last fetched {gen_date} (today is {today})"
         return False, f"already fresh (synced {gen_date})"
@@ -64,9 +65,9 @@ def _parse_ts(raw: str | None) -> datetime | None:
         return None
 
 
-def _latest_set_today(rows: list) -> datetime | None:
+def _latest_set_today(rows: list, now: datetime | None = None) -> datetime | None:
     """Most recent exercise_completed_at dated today (local), or None."""
-    today = datetime.now().astimezone().date()
+    today = (now or datetime.now().astimezone()).astimezone().date()
     latest: datetime | None = None
     for row in rows or []:
         ts = _parse_ts(row.get("exercise_completed_at"))
@@ -77,27 +78,64 @@ def _latest_set_today(rows: list) -> datetime | None:
     return latest
 
 
-def should_refetch() -> tuple[bool, str]:
+def _elapsed(delta: timedelta) -> str:
+    seconds = max(0, int(delta.total_seconds()))
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    rem = minutes % 60
+    if rem:
+        return f"{hours}h {rem}m"
+    return f"{hours}h"
+
+
+def should_refetch(now: datetime | None = None) -> tuple[bool, str]:
     """Refetch until a successful fetch has run at least one full interval
     after the most recent set — that's our signal that any late-syncing
     stragglers from the workout have been captured."""
+    now = (now or datetime.now().astimezone()).astimezone()
     if not DATA.exists():
         return True, "no data/workouts.json yet"
     try:
         data = json.loads(DATA.read_text())
     except Exception as e:
         return True, f"could not read workouts.json: {e}"
-    latest_set = _latest_set_today(data.get("rows") or [])
-    if latest_set is None:
-        return True, "no exercise recorded today yet"
     last_fetch = _parse_ts(data.get("generated_at"))
     if last_fetch is None:
         return True, "no prior fetch timestamp to compare against"
+    since_fetch = now - last_fetch
+    if since_fetch < timedelta(seconds=REFETCH_INTERVAL_SECONDS):
+        wait_reason = f"last fetch was only {_elapsed(since_fetch)} ago"
+    else:
+        wait_reason = ""
+
+    latest_set = _latest_set_today(data.get("rows") or [], now)
+    if latest_set is None:
+        if wait_reason:
+            return False, f"no exercise recorded today yet, but {wait_reason}"
+        return True, f"no exercise recorded today yet; last fetch was {_elapsed(since_fetch)} ago"
+
     gap = last_fetch - latest_set
-    if gap < timedelta(seconds=REFETCH_INTERVAL_SECONDS):
+    if gap >= timedelta(seconds=REFETCH_INTERVAL_SECONDS):
+        return False, f"most recent set captured {int(gap.total_seconds() // 3600)}h+ before last fetch — today's workout looks complete"
+    if wait_reason:
         mins = int(gap.total_seconds() // 60)
-        return True, f"last fetch was only {mins}m after the most recent set — workout may still be syncing"
-    return False, f"most recent set captured {int(gap.total_seconds() // 3600)}h+ before last fetch — today's workout looks complete"
+        return False, f"{wait_reason}; last fetch was only {mins}m after the most recent set"
+    mins = int(gap.total_seconds() // 60)
+    return True, f"last fetch was only {mins}m after the most recent set — workout may still be syncing"
+
+
+def should_fetch_on_start(force: bool = False, now: datetime | None = None) -> tuple[bool, str]:
+    if force:
+        return True, "forced"
+    stale, stale_reason = is_stale(now)
+    if stale:
+        return True, stale_reason
+    refetch, refetch_reason = should_refetch(now)
+    if refetch:
+        return True, refetch_reason
+    return False, f"{stale_reason}; {refetch_reason}"
 
 
 def run_fetch() -> None:
@@ -174,7 +212,7 @@ def main() -> None:
     args = p.parse_args()
 
     if not args.no_fetch:
-        should_fetch, reason = (True, "forced") if args.force else is_stale()
+        should_fetch, reason = should_fetch_on_start(args.force)
         if should_fetch:
             print(f"[serve] fetching: {reason}", file=sys.stderr)
             run_fetch()

@@ -108,8 +108,9 @@ python3 serve.py
 # open http://localhost:8765/
 ```
 
-`serve.py` auto-runs `fetch.py` if `data/workouts.json` is missing or
-was last synced before today. Useful flags:
+`serve.py` auto-runs `fetch.py` if `data/workouts.json` is missing, was
+last synced before today, or today's workout is still due for a scheduled
+retry. Useful flags:
 
 ```bash
 python3 serve.py --force       # always fetch, even if fresh

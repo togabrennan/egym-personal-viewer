@@ -122,8 +122,13 @@ You can still run the pieces separately:
 
 ```bash
 python3 fetch.py               # just refresh the data
+python3 fetch.py --reflatten   # rebuild workouts.json/csv from cached raw, no login
 python3 -m http.server 8765    # just serve (no fetch)
 ```
+
+`--reflatten` re-derives the flattened files from `data/workouts_raw.json`
+without touching the network. Use it after a change to how rows are derived —
+a machine rename, say — to backfill the history in place.
 
 ## Configuration
 

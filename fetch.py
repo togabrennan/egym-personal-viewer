@@ -49,6 +49,14 @@ EGYM_API = "https://mobile-api.int.api.egym.com"
 # run, so workouts edited or late-synced after we first saw them get refreshed.
 OVERLAP_DAYS = 7
 
+# eGym renames a machine now and then and does not relabel the history, so one
+# machine turns into two in the derived data. Map retired labels onto the name
+# eGym uses today; matched case-insensitively, applied when flattening (the raw
+# payload keeps whatever the API actually said).
+MACHINE_NAME_ALIASES = {
+    "egym triceps": "EGYM Triceps Press",
+}
+
 
 def parse_iso(s: object) -> datetime | None:
     if not isinstance(s, str) or not s:
@@ -198,6 +206,13 @@ def workout_richness(w: dict) -> tuple[int, int]:
     return total_sets, len(exercises)
 
 
+def canonical_machine_name(name: object) -> object:
+    """Map a retired eGym machine label onto its current name (see MACHINE_NAME_ALIASES)."""
+    if not isinstance(name, str):
+        return name
+    return MACHINE_NAME_ALIASES.get(name.strip().lower(), name)
+
+
 def flatten_workouts(workouts: list) -> list[dict]:
     """Flatten nested workout/exercise structure into one row per set (or per exercise if no sets)."""
     rows = []
@@ -228,7 +243,7 @@ def flatten_workouts(workouts: list) -> list[dict]:
                 **w_base,
                 "exercise_code": ex.get("code"),
                 "exercise_library_code": ex.get("exerciseCode"),
-                "exercise_name": ex.get("name"),
+                "exercise_name": canonical_machine_name(ex.get("name")),
                 "exercise_library": ex.get("libraryCode"),
                 "exercise_completed_at": ex.get("completedAt"),
                 "exercise_source": src.get("code"),
@@ -274,7 +289,7 @@ def flatten_strength(strength: list) -> list[dict]:
         ex = s.get("exercise") or {}
         st = s.get("strength") or {}
         out.append({
-            "exercise_name": ex.get("label"),
+            "exercise_name": canonical_machine_name(ex.get("label")),
             "exercise_code": ex.get("code"),
             "body_region": s.get("bodyRegion"),
             "source": s.get("source"),
@@ -352,6 +367,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Ignore prior data and refetch the full --years window (default: incremental).",
     )
+    p.add_argument(
+        "--reflatten",
+        action="store_true",
+        help="Rebuild workouts.json/csv from the cached raw payload without fetching or logging in.",
+    )
     return p.parse_args()
 
 
@@ -375,8 +395,71 @@ def load_existing_raw() -> dict:
     return data
 
 
+def write_outputs(user_id: str, brand: str, all_workouts: list, strength: list, bio_age: dict) -> None:
+    """Write the raw payload plus the flattened JSON/CSV the viewer reads."""
+    # Raw payload for debugging / reference.
+    atomic_write_text(
+        DATA_DIR / "workouts_raw.json",
+        json.dumps({"workouts": all_workouts, "strength": strength, "bio_age": bio_age}, indent=2),
+    )
+
+    # Flattened forms.
+    rows = flatten_workouts(all_workouts)
+    strength_rows = flatten_strength(strength)
+
+    write_csv(DATA_DIR / "workouts.csv", rows)
+
+    atomic_write_text(DATA_DIR / "workouts.json", json.dumps({
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "user_id": user_id,
+        "brand": brand,
+        "workout_count": len(all_workouts),
+        "rows": rows,
+        "strength": strength_rows,
+        "bio_age": bio_age,
+    }, indent=2, default=str))
+
+    print(
+        f"Wrote {len(rows)} rows ({len(all_workouts)} workouts, {len(strength_rows)} strength) "
+        f"to {DATA_DIR.relative_to(HERE)}/",
+        file=sys.stderr,
+    )
+
+
+def reflatten() -> None:
+    """Rebuild the flattened outputs from the cached raw payload — no network, no login.
+
+    Used to backfill after a change to how rows are derived (a machine rename,
+    say) without waiting on a full refetch.
+    """
+    raw = load_existing_raw()
+    if not raw.get("workouts"):
+        print("No cached data/workouts_raw.json to reflatten; run a fetch first.", file=sys.stderr)
+        sys.exit(1)
+
+    # Carry over the identity fields; they aren't in the raw payload.
+    user_id, brand = "", ""
+    prior = DATA_DIR / "workouts.json"
+    if prior.exists():
+        try:
+            with prior.open() as f:
+                meta = json.load(f)
+            user_id = meta.get("user_id") or ""
+            brand = meta.get("brand") or ""
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"Could not read {prior.name} ({e}); writing without user_id/brand.", file=sys.stderr)
+
+    print("Reflattening cached raw payload ...", file=sys.stderr)
+    write_outputs(user_id, brand, raw.get("workouts") or [], raw.get("strength") or [], raw.get("bio_age") or {})
+
+
 def main() -> None:
     args = parse_args()
+
+    if args.reflatten:
+        reflatten()
+        return
+
     brand, username, password = resolve_credentials(args)
     base = build_base(brand)
 
@@ -522,33 +605,7 @@ def main() -> None:
     print("Fetching bio-age ...", file=sys.stderr)
     bio_age = get_bio_age(user_id, cookie) or existing_bio_age
 
-    # Raw payload for debugging / reference.
-    atomic_write_text(
-        DATA_DIR / "workouts_raw.json",
-        json.dumps({"workouts": all_workouts, "strength": strength, "bio_age": bio_age}, indent=2),
-    )
-
-    # Flattened forms.
-    rows = flatten_workouts(all_workouts)
-    strength_rows = flatten_strength(strength)
-
-    write_csv(DATA_DIR / "workouts.csv", rows)
-
-    atomic_write_text(DATA_DIR / "workouts.json", json.dumps({
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "user_id": user_id,
-        "brand": brand,
-        "workout_count": len(all_workouts),
-        "rows": rows,
-        "strength": strength_rows,
-        "bio_age": bio_age,
-    }, indent=2, default=str))
-
-    print(
-        f"Wrote {len(rows)} rows ({len(all_workouts)} workouts, {len(strength_rows)} strength) "
-        f"to {DATA_DIR.relative_to(HERE)}/",
-        file=sys.stderr,
-    )
+    write_outputs(user_id, brand, all_workouts, strength, bio_age)
 
 
 if __name__ == "__main__":

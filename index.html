@@ -20,6 +20,7 @@
     --err-bg: #2a1515;
     --err-border: #552222;
     --err-fg: #ff6b6b;
+    --warn: #f0a35e;
   }
   html[data-theme="light"] {
     --bg: #f7f8fa;
@@ -34,6 +35,7 @@
     --err-bg: #fef2f2;
     --err-border: #fecaca;
     --err-fg: #b91c1c;
+    --warn: #b45309;
   }
   * { box-sizing: border-box; }
   body {
@@ -140,15 +142,14 @@
     </div>
 
     <div class="panel">
-      <h2>1RM Trend <span class="muted" style="font-weight:400; text-transform:none; letter-spacing:0">— latest eGym strength test vs. previous</span></h2>
+      <h2>1RM Trend <span id="strength-sub" class="muted" style="font-weight:400; text-transform:none; letter-spacing:0">— latest eGym strength test vs. previous</span></h2>
       <table id="strength-table">
         <thead><tr>
           <th>Machine</th>
           <th>Body Region</th>
           <th>1RM</th>
-          <th>Trend</th>
-          <th>Change</th>
-          <th>Last Measured</th>
+          <th>vs. Previous</th>
+          <th>All-Time Max</th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -531,9 +532,13 @@ function exportMarkdown() {
     .filter(s => s.one_rep_max_kg != null)
     .sort((a, b) => b.one_rep_max_kg - a.one_rep_max_kg);
   if (strengthLatest.length) {
-    L.push(`## 1RM Strength — Latest`, ``);
-    L.push(`| Machine | Body Region | 1RM (${u}) | Trend | Change | Last Measured |`);
-    L.push(`|---|---|---:|:---:|---|---|`);
+    const latestTest = strengthLatest.reduce(
+      (t, s) => (s.measured_at && (!t || new Date(s.measured_at) > new Date(t)) ? s.measured_at : t),
+      null,
+    );
+    L.push(`## 1RM Strength — ${latestTest ? fmtDate(latestTest) + " test" : "Latest"}`, ``);
+    L.push(`| Machine | Body Region | 1RM (${u}) | vs. Previous | All-Time Max (${u}) |`);
+    L.push(`|---|---|---:|---|---|`);
     for (const s of strengthLatest) {
       const arrow = s.progress === "up" ? "▲" : s.progress === "down" ? "▼" : "·";
       const cur = s.one_rep_max_kg;
@@ -542,9 +547,16 @@ function exportMarkdown() {
         ? cur * pct / (100 + pct)
         : s.amount_diff_kg;
       const change = (kgDelta != null && pct != null)
-        ? `${kgDelta > 0 ? "+" : ""}${fmt(convert(kgDelta), 1)} ${u} (${pct > 0 ? "+" : ""}${fmt(pct, 1)}%)`
+        ? `${arrow} ${kgDelta > 0 ? "+" : ""}${fmt(convert(kgDelta), 1)} ${u} (${pct > 0 ? "+" : ""}${fmt(pct, 1)}%)`
         : "—";
-      L.push(`| ${s.exercise_name || ""} | ${(s.body_region || "").toLowerCase()} | ${fmt(convert(cur), 1)} | ${arrow} ${s.progress || ""} | ${change} | ${fmtDate(s.measured_at)} |`);
+      const bestKg = s.best_one_rep_max_kg;
+      const best = bestKg != null
+        ? `${fmt(convert(bestKg), 1)} (${fmtDate(s.best_measured_at)}${bestKg === cur ? " · current" : ""})`
+        : "—";
+      // Only a machine that sat out the latest session carries its own date.
+      const stale = latestTest && s.measured_at && dayKey(s.measured_at) !== dayKey(latestTest);
+      const curCell = `${fmt(convert(cur), 1)}${stale ? ` (${fmtDate(s.measured_at)})` : ""}`;
+      L.push(`| ${s.exercise_name || ""} | ${(s.body_region || "").toLowerCase()} | ${curCell} | ${change} | ${best} |`);
     }
     L.push(``);
   }
@@ -715,11 +727,20 @@ async function load() {
         : null;
       progress = amount_diff_kg > 0 ? "up" : amount_diff_kg < 0 ? "down" : "same";
     }
+    // All-time peak across the history. Ties keep the earliest reading — the
+    // date a ceiling was first reached is the interesting one.
+    let best = null;
+    for (const s of arr) {
+      if (s.one_rep_max_kg == null) continue;
+      if (!best || s.one_rep_max_kg > best.one_rep_max_kg) best = s;
+    }
     STRENGTH_BY_MACHINE[k] = {
       ...latest,
       progress: progress ?? latest.progress,
       percentage_diff: percentage_diff ?? latest.percentage_diff,
       amount_diff_kg: amount_diff_kg ?? latest.amount_diff_kg,
+      best_one_rep_max_kg: best ? best.one_rep_max_kg : null,
+      best_measured_at: best ? best.measured_at : null,
     };
   }
 
@@ -991,6 +1012,20 @@ function renderStrengthPRs() {
     .filter(s => s.one_rep_max_kg != null)
     .sort((a, b) => b.one_rep_max_kg - a.one_rep_max_kg);
 
+  // eGym tests every machine in one session, so the measurement date is a fact about
+  // the table, not the row: it goes in the heading. A row only carries its own date
+  // when that machine sat out the latest session and its reading is stale.
+  const latestTest = rows.reduce(
+    (t, s) => (s.measured_at && (!t || new Date(s.measured_at) > new Date(t)) ? s.measured_at : t),
+    null,
+  );
+  const sub = document.getElementById("strength-sub");
+  if (sub) {
+    sub.textContent = latestTest
+      ? `— eGym strength test ${fmtDate(latestTest)} vs. previous`
+      : "— latest eGym strength test vs. previous";
+  }
+
   const html = rows.map(s => {
     const dir = s.progress;
     const pct = s.percentage_diff;
@@ -1002,21 +1037,36 @@ function renderStrengthPRs() {
       : s.amount_diff_kg;
     const arrow = dir === "up" ? "▲" : dir === "down" ? "▼" : "·";
     const color = dir === "up" ? "#60e2a4" : dir === "down" ? "#ff6b6b" : "#8b93a7";
-    const trend = dir ? `<span style="color:${color}">${arrow} ${dir}</span>` : "";
+    // Arrow, delta and percentage are one thought — the sign says "up" already.
     const change = (kgDelta != null && pct != null)
-      ? `<span style="color:${color}">${kgDelta > 0 ? "+" : ""}${fmt(convert(kgDelta), 1)} ${unitLabel()} (${pct > 0 ? "+" : ""}${fmt(pct, 1)}%)</span>`
+      ? `<span style="color:${color}">${arrow} ${kgDelta > 0 ? "+" : ""}${fmt(convert(kgDelta), 1)} ${unitLabel()}</span>`
+        + ` <span style="color:${color}; opacity:.75; font-size:11px">${pct > 0 ? "+" : ""}${fmt(pct, 1)}%</span>`
+      : `<span class="muted">—</span>`;
+    // All-time peak, with the date it was first hit. "· current" marks a machine
+    // sitting at its peak right now, so the repeated number doesn't read as a bug.
+    const bestKg = s.best_one_rep_max_kg;
+    const best = bestKg != null
+      ? `<strong>${fmt(convert(bestKg), 0)} ${unitLabel()}</strong>`
+        + ` <span class="muted" style="font-size:11px">${fmtDate(s.best_measured_at)}`
+        + `${bestKg === current ? " · current" : ""}</span>`
       : "";
+    // Sitting under the all-time max reads as orange, however good this cycle's trend looks.
+    const offPeak = bestKg != null && current != null && current < bestKg;
+    const stale = latestTest && s.measured_at && dayKey(s.measured_at) !== dayKey(latestTest);
+    const curCell = (offPeak
+      ? `<strong style="color:var(--warn)" title="Below all-time max">${fmt(convert(current), 0)} ${unitLabel()}</strong>`
+      : `<strong>${fmt(convert(current), 0)} ${unitLabel()}</strong>`)
+      + (stale ? ` <span class="muted" style="font-size:11px">${fmtDate(s.measured_at)}</span>` : "");
     return `<tr>
       <td>${s.exercise_name || ""}</td>
       <td class="muted">${s.body_region || ""}</td>
-      <td><strong>${fmt(convert(current), 0)} ${unitLabel()}</strong></td>
-      <td>${trend}</td>
+      <td>${curCell}</td>
       <td>${change}</td>
-      <td class="muted">${fmtDate(s.measured_at)}</td>
+      <td>${best}</td>
     </tr>`;
   }).join("");
   document.querySelector("#strength-table tbody").innerHTML =
-    html || `<tr><td colspan="6" class="muted">No strength measurements available.</td></tr>`;
+    html || `<tr><td colspan="5" class="muted">No strength measurements available.</td></tr>`;
 }
 
 function renderVolumePRs(rows) {

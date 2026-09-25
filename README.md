@@ -143,6 +143,27 @@ Credentials can come from any of these sources, highest precedence first:
 `settings.json` is git-ignored by default. `settings.json.example` is the
 template that *is* committed — never put real credentials into it.
 
+### Using 1Password
+
+If you keep your gym login in 1Password, skip `settings.json` and let the
+[1Password CLI](https://developer.1password.com/docs/cli/) inject the env
+vars at runtime. `egym.op.env` holds only `op://vault/item/field`
+references, not secrets, so it's safe to commit and follows you to any
+machine where you're signed in to `op`:
+
+1. Store `brand`, `username`, and `password` fields on a 1Password item.
+2. Edit the references in `egym.op.env` to match your vault, item, and
+   field names.
+3. Run through `op run`, which resolves the references into env vars
+   (and prompts 1Password for approval):
+
+```bash
+op run --env-file egym.op.env -- python3 serve.py
+```
+
+`serve.py` passes its environment to the `fetch.py` it spawns, so the
+credentials reach the fetch without touching disk.
+
 ### What's my "brand"?
 
 Your gym's Netpulse subdomain, case-insensitive. It's the **same
@@ -164,6 +185,7 @@ brand is `CITYFITNESS`. If you don't remember it, check:
 ├── fetch.py                 # credentials → login → API pulls → ./data/*.json
 ├── index.html               # vanilla HTML + Chart.js viewer
 ├── settings.json.example    # template — copy to settings.json (git-ignored)
+├── egym.op.env              # 1Password op:// references for `op run` (no secrets)
 ├── data/                    # generated (git-ignored)
 │   ├── workouts.json        # flattened rows + strength + bio-age (consumed by index.html)
 │   ├── workouts.csv         # same flattened data as CSV

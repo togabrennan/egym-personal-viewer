@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `egym.op.env` — 1Password `op://` references for loading credentials
+  with `op run --env-file egym.op.env -- python3 serve.py`, so no secrets
+  are stored on disk.
+
 ## [0.1.0] - 2026-04-20
 
 ### Added

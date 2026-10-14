@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Optional MCP server with seven Markdown query/refresh tools, local workout
+  dates, lb/kg units, pinned SDK via uv, secret-path access, and Host checks.
+- systemd user service and Tailscale Funnel deployment instructions in `deploy/`.
+- Cross-process fetch locking shared by the viewer and MCP server, with tests.
+  Uses `fcntl` on Unix and `msvcrt` on Windows to keep the viewer portable.
 - `egym.op.env` — 1Password `op://` references for loading credentials
   with `op run --env-file egym.op.env -- python3 serve.py`, so no secrets
   are stored on disk.

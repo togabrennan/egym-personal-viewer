@@ -1,0 +1,13 @@
+[Unit]
+Description=eGym MCP server
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/egym-personal-viewer
+EnvironmentFile=%h/.config/egym-mcp.env
+ExecStart=%h/.local/bin/uv run mcp_server.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

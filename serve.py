@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import errno
 import http.server
 import json
 import socketserver
@@ -138,16 +139,50 @@ def should_fetch_on_start(force: bool = False, now: datetime | None = None) -> t
     return False, f"{stale_reason}; {refetch_reason}"
 
 
-def run_fetch() -> None:
+def _fetch_file_lock(lock_file, *, unlock: bool = False) -> None:
+    """Lock without waiting, or unlock, using the platform's stdlib API.
+
+    Windows locks the first byte (which may be beyond EOF); Unix locks the
+    whole file. Contention raises BlockingIOError on either platform.
+    """
+    if sys.platform == "win32":
+        import msvcrt
+
+        lock_file.seek(0)
+        try:
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK if unlock else msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if not unlock and exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                raise BlockingIOError(exc.errno, "Another process is fetching") from exc
+            raise
+    else:
+        import fcntl
+
+        fcntl.flock(lock_file, fcntl.LOCK_UN if unlock else fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def run_fetch() -> str | None:
     """Run fetch.py as a subprocess so it has its own argv/globals and its
-    failures can't take down the serve process."""
-    result = subprocess.run(
-        [sys.executable, str(HERE / "fetch.py")],
-        cwd=HERE,
-        check=False,
-    )
-    if result.returncode != 0:
-        print("[serve] fetch failed; continuing with existing data", file=sys.stderr)
+    failures can't take down the serve process. Return None on success or
+    a failure/busy message for callers that need to report the outcome."""
+    DATA.parent.mkdir(parents=True, exist_ok=True)
+    with (DATA.parent / ".fetch.lock").open("a+b") as lock_file:
+        try:
+            _fetch_file_lock(lock_file)
+        except BlockingIOError:
+            print("[serve] skipping fetch: another process is fetching", file=sys.stderr)
+            return "A fetch is already running"
+        try:
+            result = subprocess.run(
+                [sys.executable, str(HERE / "fetch.py")],
+                cwd=HERE,
+                check=False,
+            )
+            if result.returncode != 0:
+                print("[serve] fetch failed; continuing with existing data", file=sys.stderr)
+                return f"Fetch failed (exit code {result.returncode}); continuing with existing data"
+        finally:
+            _fetch_file_lock(lock_file, unlock=True)
 
 
 def refetch_loop() -> None:

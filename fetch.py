@@ -20,6 +20,7 @@ import argparse
 import csv
 import io
 import json
+import math
 import os
 import sys
 import tempfile
@@ -178,6 +179,50 @@ def get_strength_history(user_id: str, cookie: str, start: datetime, end: dateti
     except Exception as e:
         print(f"  strength fetch failed: {e}", file=sys.stderr)
         return {"strengthMeasurements": []}
+
+
+def get_body_weight_history(user_id: str, cookie: str, start: datetime, end: datetime,
+                            timezone_name: str) -> list | None:
+    """Daily body weights; None means a failed request, not an empty history."""
+    query = urllib.parse.urlencode({
+        "startDate": start.date().isoformat(), "endDate": end.date().isoformat(),
+        "types": "WEIGHT_KG", "granularity": "ONE_ITEM_PER_DAY",
+        "timezone": timezone_name,
+    })
+    try:
+        result = fetch(f"{EGYM_API}/measurements/api/v1.0/exercisers/{user_id}/body/history?{query}", cookie)
+        if not isinstance(result, list):
+            raise ValueError("expected a list of body measurement histories")
+        return result
+    except Exception as exc:
+        print(f"  body-weight fetch failed: {exc}", file=sys.stderr)
+        return None
+
+
+def flatten_body_weight(history: list) -> list[dict]:
+    """Keep positive, finite daily weights, sorted by recorded local date."""
+    by_date = {}
+    for metric in history:
+        if metric.get("type") != "WEIGHT_KG":
+            continue
+        for item in metric.get("history") or []:
+            try:
+                day = datetime.strptime(item["date"], "%Y-%m-%d").date().isoformat()
+                value = float(item["value"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if math.isfinite(value) and value > 0:
+                by_date[day] = {"date": day, "weight_kg": value}
+    return [by_date[day] for day in sorted(by_date)]
+
+
+def merge_body_weight(existing: list, fresh: list) -> list:
+    # Re-fetch the full small history so older corrections are picked up too.
+    # New readings replace the same date; omitted readings stay cached.
+    rows = flatten_body_weight(existing + fresh)
+    return [{"type": "WEIGHT_KG", "history": [
+        {"date": row["date"], "value": row["weight_kg"]} for row in rows
+    ]}]
 
 
 def _attr(attrs: dict | None, key: str) -> tuple[object, object]:
@@ -362,6 +407,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--username", help="Member email")
     p.add_argument("--password", help="Member password")
     p.add_argument("--years", type=int, default=10, help="How many years back to scan on a full fetch (default: 10)")
+    p.add_argument("--timezone", help="IANA timezone for daily body weights (default: latest workout timezone, or UTC)")
     p.add_argument(
         "--full",
         action="store_true",
@@ -395,12 +441,14 @@ def load_existing_raw() -> dict:
     return data
 
 
-def write_outputs(user_id: str, brand: str, all_workouts: list, strength: list, bio_age: dict) -> None:
+def write_outputs(user_id: str, brand: str, all_workouts: list, strength: list, bio_age: dict,
+                  body_weight: list | None = None, body_weight_timezone: str = "UTC") -> None:
     """Write the raw payload plus the flattened JSON/CSV the viewer reads."""
     # Raw payload for debugging / reference.
     atomic_write_text(
         DATA_DIR / "workouts_raw.json",
-        json.dumps({"workouts": all_workouts, "strength": strength, "bio_age": bio_age}, indent=2),
+        json.dumps({"workouts": all_workouts, "strength": strength, "bio_age": bio_age,
+                    "body_weight": body_weight or [], "body_weight_timezone": body_weight_timezone}, indent=2),
     )
 
     # Flattened forms.
@@ -417,6 +465,8 @@ def write_outputs(user_id: str, brand: str, all_workouts: list, strength: list, 
         "rows": rows,
         "strength": strength_rows,
         "bio_age": bio_age,
+        "body_weight": flatten_body_weight(body_weight or []),
+        "body_weight_timezone": body_weight_timezone,
     }, indent=2, default=str))
 
     print(
@@ -450,7 +500,8 @@ def reflatten() -> None:
             print(f"Could not read {prior.name} ({e}); writing without user_id/brand.", file=sys.stderr)
 
     print("Reflattening cached raw payload ...", file=sys.stderr)
-    write_outputs(user_id, brand, raw.get("workouts") or [], raw.get("strength") or [], raw.get("bio_age") or {})
+    write_outputs(user_id, brand, raw.get("workouts") or [], raw.get("strength") or [], raw.get("bio_age") or {},
+                  raw.get("body_weight") or [], raw.get("body_weight_timezone") or "UTC")
 
 
 def main() -> None:
@@ -605,7 +656,22 @@ def main() -> None:
     print("Fetching bio-age ...", file=sys.stderr)
     bio_age = get_bio_age(user_id, cookie) or existing_bio_age
 
-    write_outputs(user_id, brand, all_workouts, strength, bio_age)
+    latest_workout = max((w for w in all_workouts if w.get("timezone")),
+                         key=lambda w: w.get("completedAt") or "", default={})
+    body_timezone = args.timezone or latest_workout.get("timezone") or existing.get("body_weight_timezone") or "UTC"
+    print(f"Fetching body-weight history ({body_timezone}) ...", file=sys.stderr)
+    fresh_body_weight = get_body_weight_history(user_id, cookie, full_earliest, end, body_timezone)
+    existing_body_weight = existing.get("body_weight") or []
+    if fresh_body_weight is None:
+        body_weight = existing_body_weight
+        body_timezone = existing.get("body_weight_timezone") or body_timezone
+    elif existing_body_weight and existing.get("body_weight_timezone") != body_timezone:
+        # Daily buckets from different timezones cannot safely be merged.
+        body_weight = fresh_body_weight
+    else:
+        body_weight = merge_body_weight(existing_body_weight, fresh_body_weight)
+    print(f"  {len(flatten_body_weight(body_weight))} daily body weights", file=sys.stderr)
+    write_outputs(user_id, brand, all_workouts, strength, bio_age, body_weight, body_timezone)
 
 
 if __name__ == "__main__":

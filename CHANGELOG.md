@@ -8,7 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Optional MCP server with seven Markdown query/refresh tools, local workout
+- Daily body-weight history in regular syncs, cached raw/flattened JSON,
+  viewer charts and Markdown exports. New `get_body_weight` MCP tool;
+  strength histories include prior weigh-ins and 1RM/body-weight ratios.
+- Optional MCP server with eight Markdown query/refresh tools, local workout
   dates, lb/kg units, pinned SDK via uv, secret-path access, and Host checks.
 - systemd user service and Tailscale Funnel deployment instructions in `deploy/`.
 - Cross-process fetch locking shared by the viewer and MCP server, with tests.

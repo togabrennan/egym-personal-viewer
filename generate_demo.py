@@ -215,6 +215,12 @@ def main() -> None:
         "rows": workout_rows,
         "strength": strength_rows,
         "bio_age": bio_age,
+        "body_weight": [
+            {"date": (NOW - timedelta(days=d)).date().isoformat(),
+             "weight_kg": round(85 + d * 0.06, 2)}
+            for d in range(WINDOW_DAYS - 1, -1, -1)
+        ],
+        "body_weight_timezone": "America/New_York",
     }, indent=2))
     print(
         f"Wrote demo data to {OUT.relative_to(HERE)}:\n"

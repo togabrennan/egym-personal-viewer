@@ -117,6 +117,42 @@ class MCPToolTests(unittest.TestCase):
         self.assertNotIn('Flexibility', result)
         self.assertNotIn('None', result)
 
+    def test_body_weight_history_calendar_window_and_units(self):
+        self.fixture['body_weight'] = [
+            {'date': '2026-07-21', 'weight_kg': 90},
+            {'date': '2026-07-01', 'weight_kg': 100},
+        ]
+        self.fixture['body_weight_timezone'] = 'America/New_York'
+        self.write()
+        result = mcp.get_body_weight(unit='kg')
+        self.assertIn('change: -10.0 kg (-10.0%)', result)
+        self.assertLess(result.index('| 2026-07-01'), result.index('| 2026-07-21'))
+        self.assertIn('198.4 lb', mcp.get_body_weight(days=1))
+        self.assertNotIn('2026-07-01', mcp.get_body_weight(days=1))
+        self.assertIn('positive integer', mcp.get_body_weight(days=0))
+        self.assertIn('unit must', mcp.get_body_weight(unit='oz'))
+        self.fixture.pop('body_weight')
+        self.write()
+        self.assertIn('No body-weight', mcp.get_body_weight())
+
+    def test_strength_pairs_prior_weights_with_age_limit_and_recorded_timezone(self):
+        self.fixture['body_weight_timezone'] = 'America/New_York'
+        self.fixture['body_weight'] = [
+            {'date': '2026-06-23', 'weight_kg': 110},
+            {'date': '2026-07-02', 'weight_kg': 100},
+            {'date': '2026-07-04', 'weight_kg': 80},
+        ]
+        self.write()
+        result = mcp.get_strength('leg', unit='kg')
+        self.assertIn('| 2026-07-01T12:00:00Z | 100.0 kg | — | — | — |', result)
+        self.assertIn('| 2026-07-03T12:00:00Z | 120.0 kg | 100.0 kg | 2026-07-02 | 1.20× |', result)
+        self.assertIn('| 100.0 kg | 2026-07-02 | 1.20× |', mcp.get_strength(unit='kg'))
+        test = {'measured_at': '2026-07-04T01:00:00Z', 'one_rep_max_kg': 120}
+        self.assertEqual(mcp._relative_strength_cells(self.fixture, test, 'kg'),
+                         ['100.0 kg', '2026-07-02', '1.20×'])
+        self.assertIsNotNone(mcp._body_weight_at(self.fixture, '2026-07-11T12:00:00Z'))
+        self.assertIsNone(mcp._body_weight_at(self.fixture, '2026-07-12T12:00:00Z'))
+
     def test_bad_inputs_and_empty_data(self):
         self.write()
         self.assertIn('YYYY-MM-DD', mcp.get_day('bad'))
@@ -176,13 +212,14 @@ class MCPToolTests(unittest.TestCase):
                                       'clientInfo': {'name': 'egym-test', 'version': '1'}})
             self.assertEqual(init['serverInfo']['name'], 'eGym')
             tools = rpc('tools/list', {})['tools']
-            self.assertEqual(len(tools), 7)
+            self.assertEqual(len(tools), 8)
             for tool in tools:
                 self.assertEqual(tool['annotations']['readOnlyHint'], tool['name'] != 'refresh')
             with patch.object(serve, 'run_fetch', return_value=None):
                 for name, args in [('get_summary', {}), ('get_gym_days', {}),
                                    ('get_day', {'date': '2026-07-20'}), ('get_strength', {'machine': 'leg'}),
-                                   ('get_machine_history', {'machine': 'leg'}), ('get_bio_age', {}), ('refresh', {})]:
+                                   ('get_machine_history', {'machine': 'leg'}), ('get_bio_age', {}),
+                                   ('get_body_weight', {}), ('refresh', {})]:
                     with self.subTest(tool=name):
                         result = rpc('tools/call', {'name': name, 'arguments': args})
                         self.assertFalse(result.get('isError'), result)

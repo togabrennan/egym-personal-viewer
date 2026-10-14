@@ -92,6 +92,25 @@ def _weight(kg, unit):
     return "—" if kg is None else f"{float(kg) * (2.20462 if unit == 'lb' else 1):.1f} {unit}"
 
 
+def _body_weight_at(data, measured_at):
+    """Pair a test with a prior daily weigh-in, at most seven days old."""
+    day = _local_date(measured_at, data.get("body_weight_timezone"))
+    if day is None:
+        return None
+    cutoff = (Date.fromisoformat(day) - timedelta(days=7)).isoformat()
+    candidates = [r for r in data.get("body_weight") or []
+                  if cutoff <= r["date"] <= day and r.get("weight_kg", 0) > 0]
+    return max(candidates, key=lambda r: r["date"], default=None)
+
+
+def _relative_strength_cells(data, test, unit):
+    weight = _body_weight_at(data, test["measured_at"])
+    if not weight:
+        return ["—", "—", "—"]
+    return [_weight(weight["weight_kg"], unit), weight["date"],
+            f"{test['one_rep_max_kg'] / weight['weight_kg']:.2f}×"]
+
+
 def _cell(value):
     return str(value if value is not None else "—").replace("|", "\\|").replace("\n", " ").replace("\r", " ")
 
@@ -141,6 +160,7 @@ def get_summary() -> str:
     synced = _timestamp(data.get("generated_at"))
     age = f"synced {max(0, (_now() - synced).total_seconds() / 3600):.1f} h ago" if synced else "sync time unknown"
     machines = sorted({r['exercise_name'] for r in data.get('rows') or [] if r.get('exercise_name')})
+    weights = sorted(data.get("body_weight") or [], key=lambda r: r["date"])
     return _table(["Metric", "Value"], [
         ["Sync", f"{age} ({data.get('generated_at') or '—'})"],
         ["Total workouts", data.get("workout_count", 0)],
@@ -148,6 +168,8 @@ def get_summary() -> str:
         ["Last gym day", dates[-1] if dates else "—"],
         *[[f"Gym days in last {n} days", len(_recent(grouped, n))] for n in (7, 30, 90)],
         ["Machines used", ", ".join(machines) or "none"],
+        ["Daily body-weight measurements", len(weights)],
+        ["Latest body weight", f"{_weight(weights[-1]['weight_kg'], 'lb')} ({weights[-1]['date']})" if weights else "—"],
     ])
 
 
@@ -189,8 +211,31 @@ def get_day(date: str, unit: Unit = "lb") -> str:
 
 
 @_read_tool
+def get_body_weight(days: int | None = None, unit: Unit = "lb") -> str:
+    """Body-weight history and change over the requested calendar days; omit days for all history."""
+    data = load()
+    _weight(0, unit)
+    rows = sorted(data.get("body_weight") or [], key=lambda r: r["date"])
+    if days is not None:
+        # Reuse calendar-day validation and filtering without treating dates as UTC timestamps.
+        grouped = _recent({r["date"]: r for r in rows}, days)
+        rows = [grouped[day] for day in sorted(grouped)]
+    if not rows:
+        return "No body-weight measurements in this range — refresh to fetch available history."
+    first, latest = rows[0], rows[-1]
+    delta = latest["weight_kg"] - first["weight_kg"]
+    summary = (f"{len(rows)} daily measurements ({data.get('body_weight_timezone') or 'recorded local dates'}). "
+               f"First: {_weight(first['weight_kg'], unit)} ({first['date']}); "
+               f"latest: {_weight(latest['weight_kg'], unit)} ({latest['date']}); "
+               f"change: {'+' if delta > 0 else ''}{_weight(delta, unit)} "
+               f"({delta / first['weight_kg'] * 100:+.1f}%).")
+    return summary + "\n\n" + _table(["Date", f"Body weight ({unit})"], [
+        [r["date"], _weight(r["weight_kg"], unit)] for r in rows])
+
+
+@_read_tool
 def get_strength(machine: str | None = None, unit: Unit = "lb") -> str:
-    """Get latest and best tested 1RMs and change from the previous test; supply a machine for its full history. Names match case-insensitively, exact first then substring."""
+    """Get tested 1RMs, prior weigh-ins, and 1RM/body-weight ratios; supply a machine for its full history. Names match case-insensitively, exact first then substring."""
     data = load()
     _weight(0, unit)
     grouped = defaultdict(list)
@@ -203,8 +248,10 @@ def get_strength(machine: str | None = None, unit: Unit = "lb") -> str:
         name, error = _match(machine, grouped)
         if error:
             return error
-        return f"## {_cell(name)} — 1RM history\n" + _table(["Measured at", f"1RM ({unit})"], [
-            [r["measured_at"], _weight(r["one_rep_max_kg"], unit)] for r in grouped[name]])
+        return f"## {_cell(name)} — 1RM history\n" + _table(
+            ["Measured at", f"1RM ({unit})", f"Body weight ({unit})", "Weigh-in date", "1RM / body weight"], [
+                [r["measured_at"], _weight(r["one_rep_max_kg"], unit), *_relative_strength_cells(data, r, unit)]
+                for r in grouped[name]]) + "\nBody weight uses the latest weigh-in on or before the test date, within 7 days; missing matches are —."
     result = []
     for name, tests in sorted(grouped.items(), key=lambda item: item[1][-1]["one_rep_max_kg"], reverse=True):
         latest = tests[-1]
@@ -216,8 +263,11 @@ def get_strength(machine: str | None = None, unit: Unit = "lb") -> str:
             change = ("+" if delta > 0 else "") + _weight(delta, unit)
             change += f" ({delta / prev * 100:+.1f}%)" if prev else " (—%)"
         result.append([name, _weight(latest["one_rep_max_kg"], unit), _local_date(latest["measured_at"]),
-                       _weight(best["one_rep_max_kg"], unit), _local_date(best["measured_at"]), change, len(tests)])
-    return _table(["Machine", f"Latest 1RM ({unit})", "Date", f"All-time max ({unit})", "Max date", "Change", "Tests"], result)
+                       _weight(best["one_rep_max_kg"], unit), _local_date(best["measured_at"]), change, len(tests),
+                       *_relative_strength_cells(data, latest, unit)])
+    return _table(["Machine", f"Latest 1RM ({unit})", "Date", f"All-time max ({unit})", "Max date", "Change", "Tests",
+                   f"Body weight ({unit})", "Weigh-in date", "1RM / body weight"], result) + \
+        "\nBody weight uses a prior weigh-in within 7 days; missing matches are —. Ratios compare a machine to itself over time."
 
 
 @_read_tool
@@ -309,7 +359,7 @@ def create_app(path: str, host: str = "127.0.0.1"):
     from mcp.types import ToolAnnotations
 
     server = MCPServer("eGym", instructions="Call get_summary first. Weights default to lb; workout days use the recorded timezone.")
-    for tool in (get_summary, get_gym_days, get_day, get_strength, get_machine_history, get_bio_age):
+    for tool in (get_summary, get_gym_days, get_day, get_strength, get_machine_history, get_bio_age, get_body_weight):
         server.tool(annotations=ToolAnnotations(readOnlyHint=True), structured_output=False)(tool)
     server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True),
                 structured_output=False)(refresh)

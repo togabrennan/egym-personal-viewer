@@ -125,6 +125,17 @@
       <div class="chart-wrap small"><canvas id="ap-chart"></canvas></div>
     </div>
 
+    <div class="panel" id="body-weight-panel" style="display:none">
+      <h2>Body Weight &amp; Strength</h2>
+      <div class="row" style="margin-bottom:12px">
+        <label class="muted" for="body-strength-machine">Strength test:</label>
+        <select id="body-strength-machine"></select>
+      </div>
+      <p class="muted" id="body-weight-summary"></p>
+      <div class="chart-wrap"><canvas id="body-weight-chart"></canvas></div>
+      <p class="muted">Recorded daily body weight and machine-tested 1RM. Compare each machine with its own history.</p>
+    </div>
+
     <div class="two-col">
       <div class="panel">
         <h2>Weight per Rep by Machine</h2>
@@ -251,6 +262,8 @@ let ACTIVITY_CHART = null;
 let STRENGTH_BY_MACHINE = {};
 let STRENGTH_HISTORY = {};
 let BIO_AGE = null;
+let BODY_WEIGHT = [];
+let BODY_WEIGHT_CHART = null;
 
 function getFilteredRows() {
   return ALL_ROWS.filter(inRange);
@@ -263,6 +276,7 @@ function rerenderAll() {
   renderStats(rows);
   if (ACTIVITY_CHART) { ACTIVITY_CHART.destroy(); ACTIVITY_CHART = null; }
   renderActivityPoints(rows);
+  renderBodyWeight();
   renderMachineSelector(rows);
   renderRecent(rows);
   renderStrengthPRs();     // not filtered — strength is "latest" only
@@ -424,6 +438,12 @@ function exportMarkdown() {
     .map(arr => arr.filter(s => s.one_rep_max_kg != null))
     .filter(arr => arr.length > 0)
     .sort((a, b) => b[b.length - 1].one_rep_max_kg - a[a.length - 1].one_rep_max_kg);
+  if (BODY_WEIGHT.length) {
+    L.push(`## Body Weight History`, ``, `Daily recorded body weight.`, ``);
+    L.push(`| Date | Body weight (${u}) |`, `|---|---:|`);
+    for (const r of BODY_WEIGHT) L.push(`| ${r.date} | ${fmt(convert(r.weight_kg), 1)} |`);
+    L.push(``);
+  }
   if (progression.length) {
     L.push(`## Strength Progression Summary`, ``);
     L.push(`Machine-measured 1RM per machine, first test vs latest.`, ``);
@@ -745,6 +765,8 @@ async function load() {
   }
 
   BIO_AGE = data.bio_age || null;
+  BODY_WEIGHT = (data.body_weight || []).filter(r => r.date && Number.isFinite(r.weight_kg) && r.weight_kg > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
 
   document.getElementById("main").style.display = "block";
   renderBioAge();
@@ -865,6 +887,57 @@ function renderActivityPoints(rows) {
       },
       plugins: { legend: { display: false } },
     },
+  });
+}
+
+function renderBodyWeight() {
+  const panel = document.getElementById("body-weight-panel");
+  panel.style.display = BODY_WEIGHT.length ? "block" : "none";
+  if (BODY_WEIGHT_CHART) { BODY_WEIGHT_CHART.destroy(); BODY_WEIGHT_CHART = null; }
+  if (!BODY_WEIGHT.length) return;
+  const sel = document.getElementById("body-strength-machine");
+  const previous = sel.value;
+  const machines = Object.keys(STRENGTH_HISTORY).sort((a, b) =>
+    STRENGTH_HISTORY[a][0].exercise_name.localeCompare(STRENGTH_HISTORY[b][0].exercise_name));
+  sel.replaceChildren(...machines.map(k => new Option(STRENGTH_HISTORY[k][0].exercise_name, k)));
+  if (machines.includes(previous)) sel.value = previous;
+  sel.onchange = renderBodyWeight;
+  const cutoff = rangeCutoff();
+  // Dates are local calendar days, not UTC midnights. Include a weigh-in for
+  // the cutoff day even when the rolling cutoff falls later that day.
+  const cutoffDay = Number.isFinite(cutoff) ? dayKey(cutoff) : "";
+  const weights = BODY_WEIGHT.filter(r => r.date >= cutoffDay);
+  const tests = (STRENGTH_HISTORY[sel.value] || []).filter(s =>
+    s.measured_at && s.one_rep_max_kg != null && new Date(s.measured_at).getTime() >= cutoff);
+  const summary = document.getElementById("body-weight-summary");
+  if (weights.length) {
+    const first = weights[0], latest = weights[weights.length - 1];
+    const delta = latest.weight_kg - first.weight_kg;
+    summary.textContent = `${RANGE_LABELS[RANGE]}: ${fmt(convert(first.weight_kg))} → ${fmt(convert(latest.weight_kg))} ${unitLabel()}`
+      + ` (${delta > 0 ? "+" : ""}${fmt(convert(delta))} ${unitLabel()}, ${delta > 0 ? "+" : ""}${fmt(delta / first.weight_kg * 100)}%)`
+      + ` · ${weights.length} daily weigh-ins · Latest ${fmtDayKey(latest.date)}`;
+  } else {
+    summary.textContent = `No body-weight measurements in ${RANGE_LABELS[RANGE].toLowerCase()}.`;
+  }
+  BODY_WEIGHT_CHART = new Chart(document.getElementById("body-weight-chart"), {
+    type: "line",
+    data: { datasets: [
+      { label: `Body Weight (${unitLabel()})`, data: weights.map(r => ({
+          x: new Date(r.date + "T00:00:00").getTime(), y: convert(r.weight_kg)
+        })), borderColor: "#34b9a0", backgroundColor: "#34b9a0", pointRadius: 2, tension: 0 },
+      { label: `1RM Test (${unitLabel()})`, data: tests.map(s => ({
+          x: new Date(s.measured_at).getTime(), y: convert(s.one_rep_max_kg)
+        })), borderColor: "#ff9f40", backgroundColor: "#ff9f40", pointRadius: 5,
+        pointStyle: "rectRot", borderDash: [4, 4], tension: 0 }
+    ] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { x: dayTimeAxis(), y: { beginAtZero: false,
+        title: { display: true, text: `Weight (${unitLabel()})` } } },
+      plugins: { tooltip: { callbacks: {
+        label: ctx => `${ctx.dataset.label}: ${fmt(ctx.raw.y)} ${unitLabel()}`
+      } } }
+    }
   });
 }
 

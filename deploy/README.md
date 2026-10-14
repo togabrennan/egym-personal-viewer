@@ -91,7 +91,7 @@ uv run mcp_server.py --no-fetch
 
 In another terminal run `npx @modelcontextprotocol/inspector`, select
 Streamable HTTP and connect to `http://127.0.0.1:8000/<generated-token>/mcp`.
-Call all seven tools. The read tools return Markdown, default to pounds,
+Call all eight tools. The read tools return Markdown, default to pounds,
 and accept `unit="kg"` where applicable. `refresh` uses your credentials
 and performs a real fetch. `--no-fetch` disables automatic startup and
 periodic fetching, while manual refresh remains available.

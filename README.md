@@ -49,6 +49,7 @@ and liability.
 ## Features
 
 - Full workout history (sets, reps, working weight, activity points)
+- Daily body-weight history alongside machine-tested strength, with lb/kg units
 - Latest 1RM readings with ▲/▼ trend and precise % change
 - Bio-age snapshot: Total, Cardio (+RHR, VO₂max), Metabolic (+BMI, body fat),
   Muscle (Upper / Core / Lower), Flexibility
@@ -133,9 +134,21 @@ a machine rename, say — to backfill the history in place.
 ## Ask Claude about your data (MCP)
 
 The optional `mcp_server.py` exposes workout summaries, gym days, sets,
-strength-test history, machine history, bio age, and a manual refresh tool
-to Claude over Streamable HTTP. Read tools return compact Markdown and
+strength-test history, machine history, bio age, daily body-weight history,
+and a manual refresh tool over Streamable HTTP. Read tools return compact Markdown and
 default to pounds; use `unit="kg"` for kilograms.
+
+`get_body_weight()` returns all daily weigh-ins and first-to-latest change;
+use `days=90` for a recent calendar window. `get_strength(machine="Leg Press")`
+includes body weight and the machine's 1RM/body-weight ratio at each test.
+Tests use the most recent weigh-in on or before the test's local date, within
+seven days; unmatched tests show no ratio. Compare ratios within the same
+machine over time.
+
+The viewer's **Body Weight & Strength** chart shares a date and weight axis
+for daily weigh-ins and the selected machine's 1RM tests. It follows the
+existing range, unit, and theme controls. Markdown exports include weigh-ins.
+Run a fresh fetch once to backfill history; older saved files still work.
 
 Only the MCP server requires **uv and Python 3.10+**. Its pinned SDK
 dependency is installed by `uv run`; the viewer and fetch scripts remain
@@ -229,6 +242,12 @@ brand is `CITYFITNESS`. If you don't remember it, check:
 | `{brand}.netpulse.com`              | `GET /workouts/api/workouts/v2.3/exercisers/{uid}/workouts?completedAfter=…&completedBefore=…`      | workout history        |
 | `mobile-api.int.api.egym.com`       | `GET /measurements/api/v1.0/exercisers/{uid}/strength?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD`      | strength-test history  |
 | `mobile-api.int.api.egym.com`       | `GET /analysis/api/v1.0/exercisers/{uid}/bioage`                                                    | bio-age snapshot       |
+| `mobile-api.int.api.egym.com`       | `GET /measurements/api/v1.0/exercisers/{uid}/body/history?types=WEIGHT_KG&granularity=ONE_ITEM_PER_DAY&startDate=…&endDate=…&timezone=…` | daily body-weight history |
+
+Body weights are fetched across the full `--years` window on each sync so
+older corrections are included. Repeated dates are updated, and cached
+measurements survive failed requests. Daily dates use the latest workout's
+timezone; override it with `python3 fetch.py --timezone America/New_York`.
 
 Auth reuses the `Set-Cookie` returned by login for subsequent requests,
 and sends the same `user-agent` / `x-np-user-agent` headers the iOS app

@@ -5,7 +5,7 @@ workout history, strength tests, and bio-age data. One Python script
 pulls your data from your gym's mobile-app backend; a single static HTML
 page charts it in your browser.
 
-- Zero runtime dependencies beyond Python 3.9+ stdlib
+- Browser viewer: zero runtime dependencies beyond Python 3.9+ stdlib
 - No database, no build step, no server-side code
 - Dark and light themes, `lb` / `kg` toggle, rolling 7d / 30d / 90d / All windows
 
@@ -79,8 +79,8 @@ Should print `Python 3.9.x` or higher. If not:
 
 ### (Optional) Using a virtual environment
 
-You don't strictly need one — this project has **zero third-party
-dependencies** — but if you prefer to isolate Python runtimes:
+You don't strictly need one for the browser viewer — it has **zero
+third-party dependencies** — but if you prefer to isolate Python runtimes:
 
 ```bash
 python3 -m venv .venv
@@ -129,6 +129,30 @@ python3 -m http.server 8765    # just serve (no fetch)
 `--reflatten` re-derives the flattened files from `data/workouts_raw.json`
 without touching the network. Use it after a change to how rows are derived —
 a machine rename, say — to backfill the history in place.
+
+## Ask Claude about your data (MCP)
+
+The optional `mcp_server.py` exposes workout summaries, gym days, sets,
+strength-test history, machine history, bio age, and a manual refresh tool
+to Claude over Streamable HTTP. Read tools return compact Markdown and
+default to pounds; use `unit="kg"` for kilograms.
+
+Only the MCP server requires **uv and Python 3.10+**. Its pinned SDK
+dependency is installed by `uv run`; the viewer and fetch scripts remain
+stdlib-only.
+
+```sh
+export EGYM_MCP_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+uv run mcp_server.py --no-fetch
+```
+
+Connect at `http://127.0.0.1:8000/<your-token>/mcp`. Omit `--no-fetch` to
+enable startup fetching and the shared two-hour refresh loop. Both servers
+can run together; a file lock prevents their fetch subprocesses overlapping
+on Linux, macOS, and Windows. Treat the full connector URL as a secret.
+
+See [deployment and client setup](deploy/README.md) for the systemd user
+service, Tailscale Funnel, Claude connectors, and local Inspector checks.
 
 ## Configuration
 
@@ -183,6 +207,8 @@ brand is `CITYFITNESS`. If you don't remember it, check:
 ```
 .
 ├── fetch.py                 # credentials → login → API pulls → ./data/*.json
+├── mcp_server.py            # optional MCP endpoint (uv run)
+├── deploy/                  # systemd unit and remote connector setup
 ├── index.html               # vanilla HTML + Chart.js viewer
 ├── settings.json.example    # template — copy to settings.json (git-ignored)
 ├── egym.op.env              # 1Password op:// references for `op run` (no secrets)
@@ -250,8 +276,8 @@ does.
 
 PRs welcome. Guiding principles:
 
-- **Zero third-party runtime dependencies.** Keep the bar low for first-time
-  clones — Python stdlib + Chart.js from a CDN only.
+- **Keep the viewer stdlib-only.** Python stdlib + Chart.js from a CDN for
+  the viewer; MCP SDK imports belong only in `mcp_server.py`.
 - **No build step.** `index.html` is served as-is.
 - **No telemetry, no analytics, no remote logging.** Everything stays
   local.

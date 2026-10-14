@@ -8,6 +8,7 @@ data/workouts.csv
 data/workouts_raw.json
 data/*.json
 data/*.csv
+data/.fetch.lock
 
 # Python
 __pycache__/

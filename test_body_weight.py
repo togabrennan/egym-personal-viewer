@@ -51,6 +51,7 @@ class BodyWeightFetchTests(unittest.TestCase):
                  patch.object(fetch, 'get_workouts', return_value={'workouts': []}), \
                  patch.object(fetch, 'get_strength_history', return_value={}), \
                  patch.object(fetch, 'get_bio_age', return_value={}), \
+                 patch.object(fetch, 'get_extra_metrics', return_value={}), \
                  patch.object(fetch, 'get_body_weight_history', return_value=None), \
                  patch.object(fetch, 'HERE', Path(tmp).parent):
                 fetch.main()

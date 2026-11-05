@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Optional muscle imbalance, flexibility, activity level, and all available
+  latest body measurement snapshots in syncs and JSON outputs, with cached
+  fallback on request failure and a `get_extra_metrics` MCP query tool.
 - Daily body-weight history in regular syncs, cached raw/flattened JSON,
   viewer charts and Markdown exports. New `get_body_weight` MCP tool;
   strength histories include prior weigh-ins and 1RM/body-weight ratios.

@@ -212,14 +212,14 @@ class MCPToolTests(unittest.TestCase):
                                       'clientInfo': {'name': 'egym-test', 'version': '1'}})
             self.assertEqual(init['serverInfo']['name'], 'eGym')
             tools = rpc('tools/list', {})['tools']
-            self.assertEqual(len(tools), 8)
+            self.assertEqual(len(tools), 9)
             for tool in tools:
                 self.assertEqual(tool['annotations']['readOnlyHint'], tool['name'] != 'refresh')
             with patch.object(serve, 'run_fetch', return_value=None):
                 for name, args in [('get_summary', {}), ('get_gym_days', {}),
                                    ('get_day', {'date': '2026-07-20'}), ('get_strength', {'machine': 'leg'}),
                                    ('get_machine_history', {'machine': 'leg'}), ('get_bio_age', {}),
-                                   ('get_body_weight', {}), ('refresh', {})]:
+                                   ('get_body_weight', {}), ('get_extra_metrics', {}), ('refresh', {})]:
                     with self.subTest(tool=name):
                         result = rpc('tools/call', {'name': name, 'arguments': args})
                         self.assertFalse(result.get('isError'), result)

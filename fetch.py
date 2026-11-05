@@ -46,6 +46,14 @@ HEADERS_BASE = {
 
 EGYM_API = "https://mobile-api.int.api.egym.com"
 
+# Optional latest snapshots. Preserve every field/type returned by the API.
+EXTRA_METRICS = {
+    "muscle_imbalances": ("analysis", "muscleimbalances", dict),
+    "flexibility": ("measurements", "flexibility/latest", list),
+    "activity_level": ("analysis", "activitylevels", dict),
+    "body_measurements": ("measurements", "body/latest", list),
+}
+
 # Re-fetch this many days back from the latest known record on each incremental
 # run, so workouts edited or late-synced after we first saw them get refreshed.
 OVERLAP_DAYS = 7
@@ -179,6 +187,24 @@ def get_strength_history(user_id: str, cookie: str, start: datetime, end: dateti
     except Exception as e:
         print(f"  strength fetch failed: {e}", file=sys.stderr)
         return {"strengthMeasurements": []}
+
+
+def get_extra_metrics(user_id: str, cookie: str, existing: dict) -> dict:
+    """Refresh independent snapshots; failed requests retain the last good value."""
+    snapshots = {}
+    for key, (service, endpoint, expected_type) in EXTRA_METRICS.items():
+        print(f"Fetching {key.replace('_', ' ')} ...", file=sys.stderr)
+        try:
+            result = fetch(f"{EGYM_API}/{service}/api/v1.0/exercisers/{user_id}/{endpoint}", cookie)
+            if not isinstance(result, expected_type):
+                raise ValueError(f"expected {expected_type.__name__} response")
+            if key == "muscle_imbalances" and not isinstance(result.get("muscleImbalances"), list):
+                raise ValueError("expected muscleImbalances list")
+            snapshots[key] = result
+        except Exception as exc:
+            print(f"  {key} fetch failed; retaining cached data: {exc}", file=sys.stderr)
+            snapshots[key] = existing.get(key, expected_type())
+    return snapshots
 
 
 def get_body_weight_history(user_id: str, cookie: str, start: datetime, end: datetime,
@@ -442,13 +468,17 @@ def load_existing_raw() -> dict:
 
 
 def write_outputs(user_id: str, brand: str, all_workouts: list, strength: list, bio_age: dict,
-                  body_weight: list | None = None, body_weight_timezone: str = "UTC") -> None:
+                  body_weight: list | None = None, body_weight_timezone: str = "UTC",
+                  extra_metrics: dict | None = None) -> None:
     """Write the raw payload plus the flattened JSON/CSV the viewer reads."""
+    snapshots = {key: (extra_metrics or {}).get(key, expected_type())
+                 for key, (_, _, expected_type) in EXTRA_METRICS.items()}
     # Raw payload for debugging / reference.
     atomic_write_text(
         DATA_DIR / "workouts_raw.json",
         json.dumps({"workouts": all_workouts, "strength": strength, "bio_age": bio_age,
-                    "body_weight": body_weight or [], "body_weight_timezone": body_weight_timezone}, indent=2),
+                    "body_weight": body_weight or [], "body_weight_timezone": body_weight_timezone,
+                    **snapshots}, indent=2),
     )
 
     # Flattened forms.
@@ -467,6 +497,7 @@ def write_outputs(user_id: str, brand: str, all_workouts: list, strength: list, 
         "bio_age": bio_age,
         "body_weight": flatten_body_weight(body_weight or []),
         "body_weight_timezone": body_weight_timezone,
+        **snapshots,
     }, indent=2, default=str))
 
     print(
@@ -501,7 +532,7 @@ def reflatten() -> None:
 
     print("Reflattening cached raw payload ...", file=sys.stderr)
     write_outputs(user_id, brand, raw.get("workouts") or [], raw.get("strength") or [], raw.get("bio_age") or {},
-                  raw.get("body_weight") or [], raw.get("body_weight_timezone") or "UTC")
+                  raw.get("body_weight") or [], raw.get("body_weight_timezone") or "UTC", raw)
 
 
 def main() -> None:
@@ -671,7 +702,8 @@ def main() -> None:
     else:
         body_weight = merge_body_weight(existing_body_weight, fresh_body_weight)
     print(f"  {len(flatten_body_weight(body_weight))} daily body weights", file=sys.stderr)
-    write_outputs(user_id, brand, all_workouts, strength, bio_age, body_weight, body_timezone)
+    extra_metrics = get_extra_metrics(user_id, cookie, existing)
+    write_outputs(user_id, brand, all_workouts, strength, bio_age, body_weight, body_timezone, extra_metrics)
 
 
 if __name__ == "__main__":

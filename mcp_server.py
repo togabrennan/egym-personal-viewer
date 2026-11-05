@@ -320,6 +320,21 @@ def get_bio_age() -> str:
     return _table(["Metric", "Value", "Progress", "Date"], result) if result else "No bio-age measurements yet."
 
 
+@_read_tool
+def get_extra_metrics(metric: Literal["all", "muscle_imbalances", "flexibility", "activity_level", "body_measurements"] = "all") -> str:
+    """Get latest muscle balance ratios and optimal ranges, flexibility measurements,
+    activity level/points/goals, or all available body measurements. Returns complete
+    API fields in their original units. Snapshots may be cached after a failed sync;
+    these are latest readings, not measurement histories.
+    """
+    keys = ("muscle_imbalances", "flexibility", "activity_level", "body_measurements")
+    if metric != "all" and metric not in keys:
+        raise ValueError("Unknown metric; choose all, " + ", ".join(keys))
+    data = load()
+    selected = keys if metric == "all" else (metric,)
+    return json.dumps({key: data.get(key) for key in selected}, indent=2, ensure_ascii=False)
+
+
 def refresh() -> str:
     """Fetch fresh eGym data now. Takes seconds; returns busy if another fetch is running."""
     if not serve.FETCH_LOCK.acquire(blocking=False):
@@ -359,7 +374,7 @@ def create_app(path: str, host: str = "127.0.0.1"):
     from mcp.types import ToolAnnotations
 
     server = MCPServer("eGym", instructions="Call get_summary first. Weights default to lb; workout days use the recorded timezone.")
-    for tool in (get_summary, get_gym_days, get_day, get_strength, get_machine_history, get_bio_age, get_body_weight):
+    for tool in (get_summary, get_gym_days, get_day, get_strength, get_machine_history, get_bio_age, get_body_weight, get_extra_metrics):
         server.tool(annotations=ToolAnnotations(readOnlyHint=True), structured_output=False)(tool)
     server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True),
                 structured_output=False)(refresh)

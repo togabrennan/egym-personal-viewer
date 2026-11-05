@@ -135,8 +135,10 @@ a machine rename, say — to backfill the history in place.
 
 The optional `mcp_server.py` exposes workout summaries, gym days, sets,
 strength-test history, machine history, bio age, daily body-weight history,
-and a manual refresh tool over Streamable HTTP. Read tools return compact Markdown and
-default to pounds; use `unit="kg"` for kilograms.
+extra measurement snapshots, and a manual refresh tool over Streamable HTTP.
+Workout read tools return compact Markdown and default to pounds; use
+`unit="kg"` for kilograms. `get_extra_metrics` returns the complete snapshot
+fields as JSON in their original API units.
 
 `get_body_weight()` returns all daily weigh-ins and first-to-latest change;
 use `days=90` for a recent calendar window. `get_strength(machine="Leg Press")`
@@ -242,7 +244,20 @@ brand is `CITYFITNESS`. If you don't remember it, check:
 | `{brand}.netpulse.com`              | `GET /workouts/api/workouts/v2.3/exercisers/{uid}/workouts?completedAfter=…&completedBefore=…`      | workout history        |
 | `mobile-api.int.api.egym.com`       | `GET /measurements/api/v1.0/exercisers/{uid}/strength?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD`      | strength-test history  |
 | `mobile-api.int.api.egym.com`       | `GET /analysis/api/v1.0/exercisers/{uid}/bioage`                                                    | bio-age snapshot       |
+| `mobile-api.int.api.egym.com`       | `GET /analysis/api/v1.0/exercisers/{uid}/muscleimbalances` | muscle balance ratios and optimal ranges |
+| `mobile-api.int.api.egym.com`       | `GET /measurements/api/v1.0/exercisers/{uid}/flexibility/latest` | latest flexibility measurements |
+| `mobile-api.int.api.egym.com`       | `GET /analysis/api/v1.0/exercisers/{uid}/activitylevels` | activity level, points, goals and days left |
+| `mobile-api.int.api.egym.com`       | `GET /measurements/api/v1.0/exercisers/{uid}/body/latest` | all available latest body measurement types |
 | `mobile-api.int.api.egym.com`       | `GET /measurements/api/v1.0/exercisers/{uid}/body/history?types=WEIGHT_KG&granularity=ONE_ITEM_PER_DAY&startDate=…&endDate=…&timezone=…` | daily body-weight history |
+
+Every sync saves complete `muscle_imbalances`, `flexibility`, `activity_level`,
+and `body_measurements` snapshots in both `data/workouts_raw.json` and
+`data/workouts.json`. Failed optional requests keep their previous snapshot;
+successful empty responses replace it. Availability depends on your account's
+recorded measurements. These snapshots survive `--reflatten` and are accessible
+through the `get_extra_metrics` MCP tool (all categories or one by name).
+They are latest snapshots, not historical series, and do not yet have viewer charts.
+Existing workout CSV columns are unchanged.
 
 Body weights are fetched across the full `--years` window on each sync so
 older corrections are included. Repeated dates are updated, and cached
